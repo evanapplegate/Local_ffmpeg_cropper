@@ -1,0 +1,20 @@
+{
+  "name": "local-ffmpeg-cropper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Localhost MP4 cropper with ffmpeg backend and drag/drop UI",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "node server/index.js",
+    "start": "node server/index.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}
+
+

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Local FFmpeg Cropper</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <h1>Local FFmpeg Cropper</h1>
+        <p>Drag & drop MP4, crop, export — runs ffmpeg locally.</p>
+      </header>
+
+      <section class="drop">
+        <div id="dropzone" class="dropzone" tabindex="0">
+          <div>
+            <strong>Drop MP4 here</strong> or click to choose
+          </div>
+          <input id="fileInput" type="file" accept="video/mp4" multiple hidden>
+        </div>
+        <div id="fileInfo" class="file-info" hidden></div>
+        <ul id="fileList" class="file-list" hidden></ul>
+      </section>
+
+      <section class="editor" id="editor" hidden>
+        <div class="controls">
+          <div class="control-group">
+            <label>Aspect:</label>
+            <label><input type="radio" name="aspect" value="free" checked> Free</label>
+            <label><input type="radio" name="aspect" value="1:1"> 1:1</label>
+            <label><input type="radio" name="aspect" value="9:16"> 9:16 (portrait)</label>
+          </div>
+          <div class="control-group">
+            <label for="outName">Output name:</label>
+            <input id="outName" type="text" placeholder="output.mp4">
+            <button id="exportBtn" class="primary">Export Crop</button>
+          </div>
+        </div>
+
+        <div class="video-wrap" id="videoWrap">
+          <video id="video" controls playsinline></video>
+          <!-- crop overlay injected by JS -->
+        </div>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>
+
+
