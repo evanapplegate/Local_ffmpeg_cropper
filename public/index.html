@@ -10,15 +10,15 @@
     <div class="container">
       <header class="header">
         <h1>Local FFmpeg Cropper</h1>
-        <p>Drag & drop MP4, crop, export — runs ffmpeg locally.</p>
+        <p>Drag & drop MP4 or MOV, crop, export — runs ffmpeg locally.</p>
       </header>
 
       <section class="drop">
         <div id="dropzone" class="dropzone" tabindex="0">
           <div>
-            <strong>Drop MP4 here</strong> or click to choose
+            <strong>Drop MP4/MOV here</strong> or click to choose
           </div>
-          <input id="fileInput" type="file" accept="video/mp4" multiple hidden>
+          <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" multiple hidden>
         </div>
         <div id="fileInfo" class="file-info" hidden></div>
         <ul id="fileList" class="file-list" hidden></ul>
@@ -31,6 +31,7 @@
             <label><input type="radio" name="aspect" value="free" checked> Free</label>
             <label><input type="radio" name="aspect" value="1:1"> 1:1</label>
             <label><input type="radio" name="aspect" value="9:16"> 9:16 (portrait)</label>
+            <label><input type="radio" name="aspect" value="16:9"> 16:9 (landscape)</label>
           </div>
           <div class="control-group">
             <label for="outName">Output name:</label>
@@ -40,14 +41,219 @@
         </div>
 
         <div class="video-wrap" id="videoWrap">
-          <video id="video" controls playsinline></video>
+          <video id="video" playsinline></video>
           <!-- crop overlay injected by JS -->
+        </div>
+        <div class="video-controls">
+          <button id="playPauseBtn" class="primary">Play</button>
+        </div>
+      </section>
+
+      <section class="combiner" id="combiner">
+        <h2>Video-Audio Combiner</h2>
+        
+        <div class="file-drops">
+          <div class="drop-container">
+            <div id="videoDropzone" class="combiner-dropzone" tabindex="0">
+              <div>
+                <strong>Drop Video (MOV/MP4)</strong> or click to choose
+              </div>
+              <input id="videoFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" hidden>
+            </div>
+            <div id="videoFileInfo" class="file-info-small" hidden></div>
+          </div>
+          
+          <div class="drop-container">
+            <div id="audioDropzone" class="combiner-dropzone" tabindex="0">
+              <div>
+                <strong>Drop Audio (MOV/MP4/MP3/WAV)</strong> or click to choose
+              </div>
+              <input id="audioFileInput" type="file" accept="audio/*,video/mp4,video/quicktime,.mp4,.mov,.mp3,.wav" hidden>
+            </div>
+            <div id="audioFileInfo" class="file-info-small" hidden></div>
+          </div>
+        </div>
+
+        <div class="timeline-section" id="timelineSection" hidden>
+          <div class="timeline-container" id="timelineContainer">
+            <div class="timeline-track" id="videoTrack">
+              <div class="track-label">Video</div>
+              <div class="track-content">
+                <div class="timeline-ruler" id="timelineRuler"></div>
+                <div class="track-block" id="videoBlock"></div>
+              </div>
+            </div>
+            <div class="timeline-track" id="audioTrack">
+              <div class="track-label">Audio</div>
+              <div class="track-content">
+                <div class="track-block" id="audioBlock"></div>
+              </div>
+            </div>
+            <div class="selection-box" id="selectionBox" hidden></div>
+            <div class="playhead" id="playhead"></div>
+          </div>
+
+          <div class="preview-section">
+            <div class="preview-wrap">
+              <video id="previewVideo" playsinline></video>
+            </div>
+            <div class="combiner-controls">
+              <button id="previewPlayPauseBtn" class="primary" disabled>Play</button>
+              <button id="combineExportBtn" class="primary" disabled>Export MP4</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="concatenator" id="concatenator">
+        <h2>Video Clip Concatenator</h2>
+        
+        <div class="drop-container">
+          <div id="concatDropzone" class="combiner-dropzone" tabindex="0">
+            <div>
+              <strong>Drop MP4/MOV here</strong> or click to choose
+            </div>
+            <input id="concatFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" hidden>
+          </div>
+          <div id="concatFileInfo" class="file-info-small" hidden></div>
+        </div>
+
+        <div class="timeline-section" id="concatTimelineSection" hidden>
+          <p class="hint">Click and drag on timeline to create selections. Create multiple selections to concatenate.</p>
+          <div class="timeline-container" id="concatTimelineContainer">
+            <div class="timeline-track" id="concatVideoTrack">
+              <div class="track-label">Video</div>
+              <div class="track-content" id="concatTrackContent">
+                <div class="timeline-ruler" id="concatTimelineRuler"></div>
+                <div class="track-block" id="concatVideoBlock"></div>
+              </div>
+            </div>
+            <div class="concat-selections" id="concatSelections"></div>
+            <div class="playhead" id="concatPlayhead"></div>
+          </div>
+
+          <div class="selection-list" id="selectionList"></div>
+
+          <div class="preview-section">
+            <div class="preview-wrap">
+              <video id="concatPreviewVideo" playsinline></video>
+            </div>
+            <div class="combiner-controls">
+              <button id="concatPlayPauseBtn" class="primary" disabled>Play</button>
+              <button id="concatExportBtn" class="primary" disabled>Concatenate Selected</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="speeder" id="speeder">
+        <h2>Video Speeder-Upper</h2>
+        
+        <div class="drop-container">
+          <div id="speederDropzone" class="combiner-dropzone" tabindex="0">
+            <div>
+              <strong>Drop MP4/MOV here</strong> or click to choose
+            </div>
+            <input id="speederFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" hidden>
+          </div>
+          <div id="speederFileInfo" class="file-info-small" hidden></div>
+        </div>
+
+        <div class="speeder-controls-section" id="speederSection" hidden>
+          <div class="controls speeder-controls">
+            <div class="control-group">
+              <label for="speedFactor">Speed Factor (e.g. 2 for 2x):</label>
+              <input id="speedFactor" type="number" step="0.1" min="0.1" value="1.0" class="small-input">
+            </div>
+            <div class="control-group">
+              <label><input type="checkbox" id="lockFps"> Lock to 30fps</label>
+            </div>
+            <div class="speed-info" id="speedInfo">
+              Original: <span id="origDuration">0:00</span> → New: <span id="newDuration">0:00</span>
+            </div>
+            <button id="speederExportBtn" class="primary">Speed Up & Export</button>
+          </div>
+
+          <div class="preview-wrap speeder-preview">
+            <video id="speederPreviewVideo" playsinline controls></video>
+          </div>
+        </div>
+      </section>
+
+      <section class="timelapser" id="timelapser">
+        <h2>Reel/LinkedIn Timelapser</h2>
+        
+        <div class="file-drops">
+          <div class="drop-container">
+            <div id="timelapseTopDropzone" class="combiner-dropzone" tabindex="0">
+              <div>
+                <strong>Drop Top Videos (MOV/MP4)</strong> or click to choose
+              </div>
+              <input id="timelapseTopFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" multiple hidden>
+            </div>
+            <div id="timelapseTopFileInfo" class="file-info-small" hidden></div>
+            <ul id="timelapseTopList" class="timelapse-list"></ul>
+          </div>
+          
+          <div class="drop-container">
+            <div id="timelapseBottomDropzone" class="combiner-dropzone" tabindex="0">
+              <div>
+                <strong>Drop Bottom Videos (MOV/MP4)</strong> or click to choose
+              </div>
+              <input id="timelapseBottomFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" multiple hidden>
+            </div>
+            <div id="timelapseBottomFileInfo" class="file-info-small" hidden></div>
+            <ul id="timelapseBottomList" class="timelapse-list"></ul>
+          </div>
+        </div>
+
+        <div class="timelapser-controls-section" id="timelapserSection" hidden>
+          <div class="controls speeder-controls">
+            <div class="speed-info" id="timelapseSpeedInfo">
+              Total Original: <span id="timelapseOrigDuration">0:00</span> → Total New: <span id="timelapseNewDuration">0:00</span>
+            </div>
+            <div class="control-group">
+              <label><input type="checkbox" id="timelapseDoubleRes"> Double Resolution (4K)</label>
+            </div>
+            <button id="timelapseExportBtn" class="primary" disabled>Export Timelapses</button>
+          </div>
+
+          <div class="timelapse-preview" id="timelapsePreview" hidden>
+            <h3>Adjust Crop Positions</h3>
+            <p class="hint">Drag each video within its pane to position what's visible.</p>
+            <div class="timelapse-mockups">
+              <div class="mockup-column">
+                <h4>Square (LinkedIn)</h4>
+                <div class="mockup-frame mockup-square" id="mockupSquare">
+                  <div class="mockup-pane" id="sqTopPane"></div>
+                  <div class="mockup-pane" id="sqBottomPane"></div>
+                </div>
+              </div>
+              <div class="mockup-column">
+                <h4>Reels (Tall)</h4>
+                <div class="mockup-frame mockup-reels" id="mockupReels">
+                  <div class="mockup-pane" id="reelsTopPane"></div>
+                  <div class="mockup-pane" id="reelsBottomPane"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="timelapseLog" class="verbose-log" hidden></div>
         </div>
       </section>
     </div>
 
+    <div id="logPanel" class="log-panel">
+      <div class="log-header" id="logToggle">
+        <span>Server Log</span>
+        <button id="logClearBtn" class="log-clear">Clear</button>
+      </div>
+      <pre id="logContent" class="log-content"></pre>
+    </div>
+
     <script src="/app.js"></script>
   </body>
-  </html>
+</html>
 
 
