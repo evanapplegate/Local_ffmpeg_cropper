@@ -20,6 +20,7 @@
           </div>
           <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" multiple hidden>
         </div>
+        <button id="cropperBrowseBtn" class="browse-btn">Browse Finder...</button>
         <div id="fileInfo" class="file-info" hidden></div>
         <ul id="fileList" class="file-list" hidden></ul>
       </section>
@@ -60,9 +61,10 @@
               </div>
               <input id="videoFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" hidden>
             </div>
+            <button id="combinerVideoBrowseBtn" class="browse-btn">Browse Finder...</button>
             <div id="videoFileInfo" class="file-info-small" hidden></div>
           </div>
-          
+
           <div class="drop-container">
             <div id="audioDropzone" class="combiner-dropzone" tabindex="0">
               <div>
@@ -70,6 +72,7 @@
               </div>
               <input id="audioFileInput" type="file" accept="audio/*,video/mp4,video/quicktime,.mp4,.mov,.mp3,.wav" hidden>
             </div>
+            <button id="combinerAudioBrowseBtn" class="browse-btn">Browse Finder...</button>
             <div id="audioFileInfo" class="file-info-small" hidden></div>
           </div>
         </div>
@@ -115,6 +118,7 @@
             </div>
             <input id="concatFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" hidden>
           </div>
+          <button id="concatBrowseBtn" class="browse-btn">Browse Finder...</button>
           <div id="concatFileInfo" class="file-info-small" hidden></div>
         </div>
 
@@ -156,6 +160,7 @@
             </div>
             <input id="speederFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" hidden>
           </div>
+          <button id="speederBrowseBtn" class="browse-btn">Browse Finder...</button>
           <div id="speederFileInfo" class="file-info-small" hidden></div>
         </div>
 
@@ -191,6 +196,7 @@
               </div>
               <input id="timelapseTopFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" multiple hidden>
             </div>
+            <button id="timelapseTopBrowseBtn" class="browse-btn">Browse Finder...</button>
             <div id="timelapseTopFileInfo" class="file-info-small" hidden></div>
             <ul id="timelapseTopList" class="timelapse-list"></ul>
           </div>
@@ -202,6 +208,7 @@
               </div>
               <input id="timelapseBottomFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" multiple hidden>
             </div>
+            <button id="timelapseBottomBrowseBtn" class="browse-btn">Browse Finder...</button>
             <div id="timelapseBottomFileInfo" class="file-info-small" hidden></div>
             <ul id="timelapseBottomList" class="timelapse-list"></ul>
           </div>

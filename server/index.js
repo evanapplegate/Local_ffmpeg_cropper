@@ -31,6 +31,7 @@ function log(...args) {
 }
 
 // Throttled ffmpeg stderr logger – emits at most once per interval
+// Prioritizes the useful status line (frame= fps= speed=) over noise like progress=continue
 function makeStderrLogger(prefix, intervalMs = 500) {
   let last = 0;
   let pending = '';
@@ -38,9 +39,11 @@ function makeStderrLogger(prefix, intervalMs = 500) {
     pending += chunk.toString();
     const now = Date.now();
     if (now - last >= intervalMs) {
-      // grab last meaningful line (skip empty)
       const lines = pending.trimEnd().split('\n').filter(l => l.trim());
-      if (lines.length) log(`${prefix} ffmpeg:`, lines[lines.length - 1].trim());
+      // Prefer the line with frame/fps/speed info
+      const statusLine = lines.reverse().find(l => /frame=|speed=|size=/.test(l));
+      const useful = statusLine || lines.find(l => !/^progress=/.test(l) && !/^(out_time|dup_|drop_|total_size|bitrate)/.test(l));
+      if (useful) log(`${prefix}`, useful.trim());
       pending = '';
       last = now;
     }
@@ -66,6 +69,8 @@ try {
 
 // Static frontend
 app.use((req, _res, next) => { log(`${req.method} ${req.url}`); next(); });
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Health check
@@ -91,11 +96,88 @@ app.get('/api/download/:id', (req, res) => {
   });
 });
 
-// Placeholder root (index.html served statically)
+// Native file picker via macOS Finder dialog
+app.post('/api/browse', (req, res) => {
+  const accept = req.body.accept || 'mov,mp4';  // comma-separated extensions
+  const multiple = req.body.multiple || false;
+  const exts = accept.split(',').map(e => e.trim().replace(/^\./, '')).filter(Boolean);
+  const typeList = exts.map(e => `"${e}"`).join(', ');
+  const multipleClause = multiple ? 'with multiple selections allowed' : '';
+
+  const script = `
+    set theFiles to choose file of type {${typeList}} ${multipleClause} with prompt "Choose file(s)"
+    if class of theFiles is list then
+      set output to ""
+      repeat with f in theFiles
+        set output to output & POSIX path of f & linefeed
+      end repeat
+      return output
+    else
+      return POSIX path of theFiles
+    end if
+  `;
+
+  log('BROWSE opening Finder dialog...');
+  const proc = spawn('osascript', ['-e', script]);
+  let stdout = '', stderr = '';
+  proc.stdout.on('data', d => { stdout += d.toString(); });
+  proc.stderr.on('data', d => { stderr += d.toString(); });
+  proc.on('close', code => {
+    if (code !== 0) {
+      // code -128 or "User canceled" is normal
+      if (stderr.includes('User canceled') || code === 1) {
+        return res.json({ canceled: true, paths: [] });
+      }
+      log('BROWSE error', stderr);
+      return res.status(500).json({ error: 'File dialog failed', details: stderr });
+    }
+    const paths = stdout.trim().split('\n').map(p => p.trim()).filter(Boolean);
+    log('BROWSE selected:', paths);
+    res.json({ canceled: false, paths });
+  });
+});
+
+// Probe a local file path — returns duration, dimensions, size
+app.post('/api/probe', (req, res) => {
+  const filePath = req.body.filePath;
+  if (!filePath) return res.status(400).json({ error: 'No filePath provided' });
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+  log('PROBE', filePath);
+  const ff = spawnSync('ffprobe', [
+    '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath
+  ], { encoding: 'utf8', timeout: 10000 });
+  if (ff.error || ff.status !== 0) {
+    return res.status(500).json({ error: 'ffprobe failed', details: (ff.stderr || '').slice(-500) });
+  }
+  try {
+    const info = JSON.parse(ff.stdout);
+    const vStream = (info.streams || []).find(s => s.codec_type === 'video');
+    const duration = parseFloat((info.format || {}).duration) || 0;
+    const stat = fs.statSync(filePath);
+    res.json({
+      duration,
+      width: vStream ? parseInt(vStream.width, 10) : 0,
+      height: vStream ? parseInt(vStream.height, 10) : 0,
+      size: stat.size,
+      filename: path.basename(filePath)
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to parse ffprobe output' });
+  }
+});
+
+// Serve a local file for browser preview (video element src)
+app.get('/api/localfile', (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath || !fs.existsSync(filePath)) return res.status(404).send('Not found');
+  res.sendFile(filePath);
+});
 
 // Crop endpoint: multipart form-data with fields: x, y, w, h, filename and file field: video
 app.post('/api/crop', upload.single('video'), (req, res) => {
-  const uploadedPath = req.file && req.file.path;
+  const localPath = req.body.filePath;
+  const uploadedPath = localPath || (req.file && req.file.path);
+  const isLocal = !!localPath;
   if (!uploadedPath) {
     log('ERROR no video uploaded');
     return res.status(400).json({ error: 'No video uploaded' });
@@ -153,7 +235,7 @@ app.post('/api/crop', upload.single('video'), (req, res) => {
   let stderrBuf = '';
 
   const cleanup = () => {
-    if (uploadedPath) {
+    if (!isLocal && uploadedPath) {
       fs.unlink(uploadedPath, () => {});
     }
   };
@@ -208,8 +290,12 @@ app.post('/api/crop', upload.single('video'), (req, res) => {
 app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 'audio', maxCount: 1 }]), (req, res) => {
   const videoFile = req.files && req.files.video && req.files.video[0];
   const audioFile = req.files && req.files.audio && req.files.audio[0];
-  
-  if (!videoFile || !audioFile) {
+  const videoLocalPath = req.body.videoFilePath;
+  const audioLocalPath = req.body.audioFilePath;
+  const videoPath = videoLocalPath || (videoFile && videoFile.path);
+  const audioPath = audioLocalPath || (audioFile && audioFile.path);
+
+  if (!videoPath || !audioPath) {
     log('ERROR missing video or audio file');
     return res.status(400).json({ error: 'Both video and audio files required' });
   }
@@ -235,8 +321,8 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
   const audioStart = Math.max(0, startTime - audioOffset);
 
   log('COMBINE start', {
-    video: { name: videoFile.originalname, size: videoFile.size },
-    audio: { name: audioFile.originalname, size: audioFile.size },
+    video: videoLocalPath || (videoFile && videoFile.originalname),
+    audio: audioLocalPath || (audioFile && audioFile.originalname),
     videoOffset,
     audioOffset,
     startTime,
@@ -245,7 +331,7 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
     videoStart,
     audioStart
   });
-  log('COMBINE video temp:', videoFile.path, '| audio temp:', audioFile.path);
+  log('COMBINE video:', videoPath, '| audio:', audioPath);
 
   const outputPath = path.join(TMP_DIR, `combine_${Date.now()}.mp4`);
   log('COMBINE output will be:', outputPath);
@@ -255,10 +341,10 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
     '-progress', 'pipe:2',
     '-ss', String(videoStart),
     '-t', String(duration),
-    '-i', videoFile.path,
+    '-i', videoPath,
     '-ss', String(audioStart),
     '-t', String(duration),
-    '-i', audioFile.path,
+    '-i', audioPath,
     '-map', '0:v:0',
     '-map', '1:a:0',
     '-af', 'afade=t=in:st=0:d=1.5',
@@ -286,8 +372,8 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
   const combineStderr = makeStderrLogger('COMBINE');
 
   const cleanup = () => {
-    if (videoFile && videoFile.path) fs.unlink(videoFile.path, () => {});
-    if (audioFile && audioFile.path) fs.unlink(audioFile.path, () => {});
+    if (!videoLocalPath && videoFile && videoFile.path) fs.unlink(videoFile.path, () => {});
+    if (!audioLocalPath && audioFile && audioFile.path) fs.unlink(audioFile.path, () => {});
   };
 
   const sendProgress = (pct) => {
@@ -350,8 +436,10 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
 // Concat endpoint: multipart form-data with fields: video, selections (JSON array), filename
 app.post('/api/concat', upload.single('video'), async (req, res) => {
   const videoFile = req.file;
-  
-  if (!videoFile) {
+  const concatLocalPath = req.body.filePath;
+  const videoSrcPath = concatLocalPath || (videoFile && videoFile.path);
+
+  if (!videoSrcPath) {
     log('ERROR no video uploaded for concat');
     return res.status(400).json({ error: 'No video uploaded' });
   }
@@ -364,7 +452,7 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
   }
 
   if (!selections.length) {
-    fs.unlink(videoFile.path, () => {});
+    if (!concatLocalPath && videoFile) fs.unlink(videoFile.path, () => {});
     return res.status(400).json({ error: 'No selections provided' });
   }
 
@@ -375,12 +463,12 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
   const clipPaths = [];
 
   log('CONCAT start', {
-    video: { name: videoFile.originalname, size: videoFile.size },
+    video: concatLocalPath || (videoFile && videoFile.originalname),
     numSelections: selections.length,
     selections,
     outputPath
   });
-  log('CONCAT video temp:', videoFile.path);
+  log('CONCAT video src:', videoSrcPath);
 
   // SSE for progress
   res.setHeader('Content-Type', 'text/event-stream');
@@ -393,10 +481,9 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
   };
 
   const cleanup = () => {
-    if (videoFile && videoFile.path) fs.unlink(videoFile.path, () => {});
+    if (!concatLocalPath && videoFile && videoFile.path) fs.unlink(videoFile.path, () => {});
     clipPaths.forEach(p => fs.unlink(p, () => {}));
     fs.unlink(concatListPath, () => {});
-    fs.unlink(outputPath, () => {});
   };
 
   try {
@@ -412,7 +499,7 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
       const args = [
         '-hide_banner',
         '-ss', String(sel.start),
-        '-i', videoFile.path,
+        '-i', videoSrcPath,
         '-t', String(duration),
         '-c', 'copy',
         '-avoid_negative_ts', 'make_zero',
@@ -492,7 +579,9 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
 // Speedup endpoint: multipart form-data with fields: video, speedFactor, lockFps, filename
 app.post('/api/speedup', upload.single('video'), async (req, res) => {
   const videoFile = req.file;
-  if (!videoFile) return res.status(400).json({ error: 'No video uploaded' });
+  const speedLocalPath = req.body.filePath;
+  const speedSrcPath = speedLocalPath || (videoFile && videoFile.path);
+  if (!speedSrcPath) return res.status(400).json({ error: 'No video uploaded' });
 
   const speedFactor = parseFloat(req.body.speedFactor) || 1.0;
   const lockFps = req.body.lockFps === 'true';
@@ -501,8 +590,8 @@ app.post('/api/speedup', upload.single('video'), async (req, res) => {
   const outName = clientFilename.endsWith('.mp4') ? clientFilename : `${clientFilename}.mp4`;
   const outputPath = path.join(TMP_DIR, `speedup_${Date.now()}.mp4`);
 
-  log('SPEEDUP start', { video: videoFile.originalname, size: videoFile.size, speedFactor, lockFps, duration });
-  log('SPEEDUP video temp:', videoFile.path, '| output:', outputPath);
+  log('SPEEDUP start', { video: speedLocalPath || (videoFile && videoFile.originalname), speedFactor, lockFps, duration });
+  log('SPEEDUP video src:', speedSrcPath, '| output:', outputPath);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -510,82 +599,163 @@ app.post('/api/speedup', upload.single('video'), async (req, res) => {
 
   const sendProgress = (pct) => res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
 
-  // setpts=1/factor for video, atempo=factor for audio (atempo limited to 0.5-2.0, so we might need multiple atempo filters)
-  let videoFilter = `setpts=${1/speedFactor}*PTS`;
-  if (lockFps) videoFilter += `,fps=30`;
+  const useSeekMethod = speedFactor >= 4;
+  const speedCleanup = () => {
+    if (!speedLocalPath && videoFile && videoFile.path) fs.unlink(videoFile.path, () => {});
+  };
 
-  // Audio speedup: atempo only supports 0.5 to 2.0. Chain them if outside range.
-  let audioFilter = '';
-  let tempFactor = speedFactor;
-  while (tempFactor > 2.0) {
-    audioFilter += (audioFilter ? ',' : '') + 'atempo=2.0';
-    tempFactor /= 2.0;
-  }
-  while (tempFactor < 0.5) {
-    audioFilter += (audioFilter ? ',' : '') + 'atempo=0.5';
-    tempFactor /= 0.5;
-  }
-  if (tempFactor !== 1.0) {
-    audioFilter += (audioFilter ? ',' : '') + `atempo=${tempFactor}`;
-  }
+  if (useSeekMethod) {
+    // FAST PATH: For high speed factors, extract individual frames by seeking to each timestamp.
+    // -ss before -i uses demuxer-level seeking (jumps to nearest keyframe) — near-instant per frame.
+    // Then stitch the frames into a video.
+    const interval = speedFactor / 30;  // seconds between frames in source (200x → 6.67s)
+    const totalFrames = Math.ceil(duration / interval);
+    const framesDir = path.join(TMP_DIR, `frames_${Date.now()}`);
+    fs.mkdirSync(framesDir, { recursive: true });
 
-  log('SPEEDUP videoFilter:', videoFilter, '| audioFilter:', audioFilter);
+    log('SPEEDUP seek method: extracting', totalFrames, 'frames, one every', interval.toFixed(2), 'sec');
 
-  const args = [
-    '-hide_banner',
-    '-progress', 'pipe:2',
-    '-i', videoFile.path,
-    '-vf', videoFilter,
-    '-af', audioFilter,
-    '-c:v', 'libx264', '-preset', 'slow', '-crf', '23',
-    '-c:a', 'aac', '-b:a', '192k',
-    '-movflags', '+faststart',
-    '-y', outputPath
-  ];
-
-  log('SPEEDUP spawning ffmpeg:', args.join(' '));
-  const ff = spawn('ffmpeg', args);
-  let stderrBuf = '';
-  const speedStderr = makeStderrLogger('SPEEDUP');
-
-  ff.stderr.on('data', (d) => {
-    stderrBuf += d.toString();
-    speedStderr(d);
-    const timeMatch = stderrBuf.match(/out_time_ms=(\d+)/g);
-    if (timeMatch && duration > 0) {
-      const lastMatch = timeMatch[timeMatch.length - 1];
-      const ms = parseInt(lastMatch.split('=')[1], 10);
-      // Progress is based on input time processed. 
-      // ffmpeg's out_time_ms for speedup will be (input_time / speedFactor)
-      // So input_time = out_time_ms * speedFactor
-      const inputTimeMs = (ms / 1000) * speedFactor;
-      const pct = Math.min(99, Math.round((inputTimeMs / duration) * 100));
+    // Extract frames in parallel batches
+    const batchSize = 16;
+    let extracted = 0;
+    for (let i = 0; i < totalFrames; i += batchSize) {
+      const batch = [];
+      for (let j = i; j < Math.min(i + batchSize, totalFrames); j++) {
+        const ts = j * interval;
+        const framePath = path.join(framesDir, `frame_${String(j).padStart(6, '0')}.jpg`);
+        batch.push(new Promise((resolve, reject) => {
+          const ff = spawn('ffmpeg', [
+            '-hide_banner', '-ss', String(ts), '-i', speedSrcPath,
+            '-frames:v', '1', '-q:v', '2', '-y', framePath
+          ]);
+          ff.on('close', code => {
+            if (code === 0) resolve();
+            else reject(new Error(`Frame ${j} failed`));
+          });
+          ff.on('error', reject);
+        }));
+      }
+      await Promise.all(batch);
+      extracted += batch.length;
+      const pct = Math.min(90, Math.round((extracted / totalFrames) * 90));
+      log(`SPEEDUP extracting frames: ${extracted}/${totalFrames} (${pct}%)`);
       sendProgress(pct);
     }
-  });
 
-  ff.on('close', (code) => {
-    log('SPEEDUP ffmpeg exited code=' + code);
-    if (code === 0 && fs.existsSync(outputPath)) {
-      sendProgress(100);
-      const data = fs.readFileSync(outputPath).toString('base64');
-      log('SPEEDUP done, sending', (Buffer.byteLength(data, 'base64') / 1024 / 1024).toFixed(1) + 'MB');
-      res.write(`data: ${JSON.stringify({ type: 'complete', filename: outName, data })}\n\n`);
-    } else {
-      log('SPEEDUP failed, stderrTail=', tail(stderrBuf));
-      res.write(`data: ${JSON.stringify({ type: 'error', error: 'ffmpeg failed', details: tail(stderrBuf) })}\n\n`);
+    log('SPEEDUP extracted', extracted, 'frames, now encoding to video...');
+
+    // Stitch frames into video at 30fps
+    const stitchArgs = [
+      '-hide_banner', '-framerate', '30',
+      '-i', path.join(framesDir, 'frame_%06d.jpg'),
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart', '-an', '-y', outputPath
+    ];
+
+    log('SPEEDUP stitching:', stitchArgs.join(' '));
+    const stitchFf = spawn('ffmpeg', stitchArgs);
+    let stitchStderr = '';
+    stitchFf.stderr.on('data', d => { stitchStderr += d.toString(); });
+
+    stitchFf.on('close', (code) => {
+      // Clean up frame images
+      fs.rm(framesDir, { recursive: true, force: true }, () => {});
+
+      if (code === 0 && fs.existsSync(outputPath)) {
+        sendProgress(100);
+        const stat = fs.statSync(outputPath);
+        log('SPEEDUP done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
+        const dlId = path.basename(outputPath);
+        pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => { speedCleanup(); fs.unlink(outputPath, () => {}); } });
+        res.write(`data: ${JSON.stringify({ type: 'complete', downloadUrl: `/api/download/${dlId}`, filename: outName })}\n\n`);
+      } else {
+        log('SPEEDUP stitch failed:', tail(stitchStderr));
+        res.write(`data: ${JSON.stringify({ type: 'error', error: 'Stitch failed', details: tail(stitchStderr) })}\n\n`);
+        speedCleanup();
+        if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
+      }
+      res.end();
+    });
+
+  } else {
+    // NORMAL PATH: For low speed factors (<4x), use setpts filter
+    let videoFilter = `setpts=${1/speedFactor}*PTS`;
+    if (lockFps) videoFilter += `,fps=30`;
+
+    let audioFilter = '';
+    let tempFactor = speedFactor;
+    while (tempFactor > 2.0) {
+      audioFilter += (audioFilter ? ',' : '') + 'atempo=2.0';
+      tempFactor /= 2.0;
     }
-    res.end();
-    fs.unlink(videoFile.path, () => {});
-    if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
-  });
+    while (tempFactor < 0.5) {
+      audioFilter += (audioFilter ? ',' : '') + 'atempo=0.5';
+      tempFactor /= 0.5;
+    }
+    if (tempFactor !== 1.0) {
+      audioFilter += (audioFilter ? ',' : '') + `atempo=${tempFactor}`;
+    }
+
+    log('SPEEDUP videoFilter:', videoFilter, '| audioFilter:', audioFilter || '(none, -an)');
+
+    const args = [
+      '-hide_banner', '-progress', 'pipe:2',
+      '-i', speedSrcPath,
+      '-vf', videoFilter,
+    ];
+    if (!audioFilter) args.push('-an');
+    else { args.push('-af', audioFilter, '-c:a', 'aac', '-b:a', '192k'); }
+    args.push('-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-movflags', '+faststart', '-y', outputPath);
+
+    log('SPEEDUP spawning ffmpeg:', args.join(' '));
+    const ff = spawn('ffmpeg', args);
+    let stderrBuf = '';
+    const speedStderr = makeStderrLogger('SPEEDUP');
+
+    ff.stderr.on('data', (d) => {
+      stderrBuf += d.toString();
+      speedStderr(d);
+      const timeMatch = stderrBuf.match(/out_time_ms=(\d+)/g);
+      if (timeMatch && duration > 0) {
+        const lastMatch = timeMatch[timeMatch.length - 1];
+        const ms = parseInt(lastMatch.split('=')[1], 10);
+        const inputTimeMs = (ms / 1000) * speedFactor;
+        const pct = Math.min(99, Math.round((inputTimeMs / duration) * 100));
+        sendProgress(pct);
+      }
+    });
+
+    ff.on('close', (code) => {
+      log('SPEEDUP ffmpeg exited code=' + code);
+      if (code === 0 && fs.existsSync(outputPath)) {
+        sendProgress(100);
+        const stat = fs.statSync(outputPath);
+        log('SPEEDUP done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
+        const dlId = path.basename(outputPath);
+        pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => { speedCleanup(); fs.unlink(outputPath, () => {}); } });
+        res.write(`data: ${JSON.stringify({ type: 'complete', downloadUrl: `/api/download/${dlId}`, filename: outName })}\n\n`);
+      } else {
+        log('SPEEDUP failed, stderrTail=', tail(stderrBuf));
+        res.write(`data: ${JSON.stringify({ type: 'error', error: 'ffmpeg failed', details: tail(stderrBuf) })}\n\n`);
+        speedCleanup();
+        if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
+      }
+      res.end();
+    });
+  }
 });
 
 // Timelapse endpoint: multipart form-data with fields: top, bottom, topFactors, bottomFactors, duration, filename
 app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]), async (req, res) => {
-  const topFiles = req.files && req.files.top;
-  const bottomFiles = req.files && req.files.bottom;
-  
+  let topFiles = req.files && req.files.top;
+  let bottomFiles = req.files && req.files.bottom;
+  const topLocalPath = req.body.topFilePath;
+  const bottomLocalPath = req.body.bottomFilePath;
+
+  // Support local paths: create fake file objects so processPane works unchanged
+  if (topLocalPath && !topFiles) topFiles = [{ path: topLocalPath, originalname: path.basename(topLocalPath), size: 0 }];
+  if (bottomLocalPath && !bottomFiles) bottomFiles = [{ path: bottomLocalPath, originalname: path.basename(bottomLocalPath), size: 0 }];
+
   if (!topFiles || !bottomFiles) return res.status(400).json({ error: 'Both top and bottom videos required' });
 
   const topFactors = [].concat(req.body.topFactors || []).map(f => parseFloat(f) || 1.0);
@@ -629,7 +799,8 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
 
   const intermediateFiles = [];
   const cleanup = () => {
-    [...topFiles, ...bottomFiles].forEach(f => fs.unlink(f.path, () => {}));
+    if (!topLocalPath) topFiles.forEach(f => fs.unlink(f.path, () => {}));
+    if (!bottomLocalPath) bottomFiles.forEach(f => fs.unlink(f.path, () => {}));
     intermediateFiles.forEach(f => fs.unlink(f, () => {}));
   };
 
@@ -667,21 +838,62 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
       const factor = factors[i];
       const clipPath = path.join(TMP_DIR, `${name}_clip_${i}_${Date.now()}.mp4`);
       
-      let audioFilter = '';
-      let tempFactor = factor;
-      while (tempFactor > 2.0) { audioFilter += (audioFilter ? ',' : '') + 'atempo=2.0'; tempFactor /= 2.0; }
-      while (tempFactor < 0.5) { audioFilter += (audioFilter ? ',' : '') + 'atempo=0.5'; tempFactor /= 0.5; }
-      if (tempFactor !== 1.0) audioFilter += (audioFilter ? ',' : '') + `atempo=${tempFactor}`;
+      if (factor >= 4) {
+        // FAST PATH: seek to each timestamp and extract one frame, then stitch
+        const fileDuration = await new Promise((resolve) => {
+          const probe = spawnSync('ffprobe', ['-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', file.path], { encoding: 'utf8' });
+          resolve(parseFloat(probe.stdout) || 0);
+        });
+        const interval = factor / 30;
+        const totalFrames = Math.ceil(fileDuration / interval);
+        const framesDir = path.join(TMP_DIR, `${name}_frames_${i}_${Date.now()}`);
+        fs.mkdirSync(framesDir, { recursive: true });
+        sendLog(`${name}[${i}]: extracting ${totalFrames} frames (seek method, 1 every ${interval.toFixed(1)}s)`);
 
-      const ffArgs = [
-        '-hide_banner', '-i', file.path,
-        '-vf', `setpts=1/${factor}*PTS,fps=30`,
-      ];
-      if (audioFilter) ffArgs.push('-af', audioFilter);
-      else ffArgs.push('-an');
-      ffArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-y', clipPath);
+        const batchSize = 16;
+        for (let fi = 0; fi < totalFrames; fi += batchSize) {
+          const batch = [];
+          for (let fj = fi; fj < Math.min(fi + batchSize, totalFrames); fj++) {
+            const ts = fj * interval;
+            const framePath = path.join(framesDir, `frame_${String(fj).padStart(6, '0')}.jpg`);
+            batch.push(new Promise((resolve, reject) => {
+              const ff = spawn('ffmpeg', [
+                '-hide_banner', '-ss', String(ts), '-i', file.path,
+                '-frames:v', '1', '-q:v', '2', '-y', framePath
+              ]);
+              ff.on('close', code => code === 0 ? resolve() : reject(new Error(`Frame ${fj} failed`)));
+              ff.on('error', reject);
+            }));
+          }
+          await Promise.all(batch);
+        }
 
-      await runFfmpeg(ffArgs, 0, 0);
+        // Stitch frames into clip
+        await runFfmpeg([
+          '-hide_banner', '-framerate', '30',
+          '-i', path.join(framesDir, 'frame_%06d.jpg'),
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p',
+          '-an', '-y', clipPath
+        ], 0, 0);
+
+        fs.rm(framesDir, { recursive: true, force: true }, () => {});
+      } else {
+        // NORMAL PATH: setpts filter for low speed factors
+        let audioFilter = '';
+        let tempFactor = factor;
+        while (tempFactor > 2.0) { audioFilter += (audioFilter ? ',' : '') + 'atempo=2.0'; tempFactor /= 2.0; }
+        while (tempFactor < 0.5) { audioFilter += (audioFilter ? ',' : '') + 'atempo=0.5'; tempFactor /= 0.5; }
+        if (tempFactor !== 1.0) audioFilter += (audioFilter ? ',' : '') + `atempo=${tempFactor}`;
+
+        const ffArgs = [
+          '-hide_banner', '-i', file.path,
+          '-vf', `setpts=1/${factor}*PTS,fps=30`,
+        ];
+        if (!audioFilter) ffArgs.push('-an');
+        else ffArgs.push('-af', audioFilter);
+        ffArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-y', clipPath);
+        await runFfmpeg(ffArgs, 0, 0);
+      }
       
       spedUpClips.push(clipPath);
       intermediateFiles.push(clipPath);

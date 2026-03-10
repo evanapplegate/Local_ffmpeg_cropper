@@ -15,10 +15,56 @@
   let currentIdx = -1;
   let objectUrl = null;
   let cropper = null;
+  let cropperLocalPath = null;
+
+  document.getElementById('cropperBrowseBtn').addEventListener('click', async () => {
+    const paths = await browseFiles('mov,mp4');
+    if (!paths.length) return;
+    const p = paths[0];
+    try {
+      const info = await probeLocalPath(p);
+      cropperLocalPath = p;
+      currentFile = null;
+      files = [];
+      currentIdx = -1;
+      cleanupObjectUrl();
+      video.src = `/api/localfile?path=${encodeURIComponent(p)}`;
+      video.load();
+      fileInfo.textContent = `${info.filename} • ${(info.size/1e6).toFixed(1)} MB (local)`;
+      setHidden(fileInfo, false);
+      setHidden(editor, false);
+      setHidden(fileList, true);
+      const base = info.filename.replace(/\.[^.]+$/, '');
+      outName.value = `${base}_crop.mp4`;
+      setTimeout(() => video.play().catch(() => {}), 50);
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
 
   function setHidden(el, hidden) {
     if (hidden) el.setAttribute('hidden', '');
     else el.removeAttribute('hidden');
+  }
+
+  async function probeLocalPath(filePath) {
+    const resp = await fetch('/api/probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filePath })
+    });
+    if (!resp.ok) throw new Error((await resp.json()).error || 'Probe failed');
+    return await resp.json();
+  }
+
+  async function browseFiles(accept, multiple) {
+    const resp = await fetch('/api/browse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accept: accept || 'mov,mp4', multiple: !!multiple })
+    });
+    if (!resp.ok) throw new Error('Browse failed');
+    const data = await resp.json();
+    if (data.canceled) return [];
+    return data.paths || [];
   }
 
   function pickFile() { fileInput.click(); }
@@ -53,6 +99,7 @@
 
   function loadFiles(newFiles) {
     files = newFiles;
+    cropperLocalPath = null;
     if (!files.length) return;
     setHidden(fileList, false);
     setHidden(fileInfo, false);
@@ -109,12 +156,16 @@
   });
 
   exportBtn.addEventListener('click', async () => {
-    if (!currentFile || !cropper) return;
+    if ((!currentFile && !cropperLocalPath) || !cropper) return;
     const rect = cropper.getCropInSourcePixels();
     if (!rect) return;
     try {
       const form = new FormData();
-      form.append('video', currentFile, currentFile.name);
+      if (cropperLocalPath) {
+        form.append('filePath', cropperLocalPath);
+      } else {
+        form.append('video', currentFile, currentFile.name);
+      }
       form.append('x', String(rect.x));
       form.append('y', String(rect.y));
       form.append('w', String(rect.w));
@@ -451,10 +502,37 @@
 
   let combinerVideoFile = null;
   let combinerAudioFile = null;
+  let combinerVideoLocalPath = null;
+  let combinerAudioLocalPath = null;
   let combinerTimeline = null;
   let previewVideoUrl = null;
   let previewAudioUrl = null;
   let previewAudioEl = null;
+  document.getElementById('combinerVideoBrowseBtn').addEventListener('click', async () => {
+    const paths = await browseFiles('mov,mp4');
+    if (!paths.length) return;
+    try {
+      const info = await probeLocalPath(paths[0]);
+      combinerVideoLocalPath = paths[0];
+      combinerVideoFile = null;
+      videoFileInfo.textContent = `${info.filename} • ${(info.size/1e6).toFixed(1)} MB (local)`;
+      setHidden(videoFileInfo, false);
+      initTimeline();
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
+
+  document.getElementById('combinerAudioBrowseBtn').addEventListener('click', async () => {
+    const paths = await browseFiles('mov,mp4,mp3,wav');
+    if (!paths.length) return;
+    try {
+      const info = await probeLocalPath(paths[0]);
+      combinerAudioLocalPath = paths[0];
+      combinerAudioFile = null;
+      audioFileInfo.textContent = `${info.filename} • ${(info.size/1e6).toFixed(1)} MB (local)`;
+      setHidden(audioFileInfo, false);
+      initTimeline();
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
 
   function isVideoFile(file) {
     const { type = '', name = '' } = file;
@@ -574,11 +652,13 @@
     });
   }
 
-  function extractFirstFrame(file) {
+  function extractFirstFrame(fileOrUrl) {
     return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(file);
+      const isFile = fileOrUrl instanceof File;
+      const url = isFile ? URL.createObjectURL(fileOrUrl) : fileOrUrl;
       const vid = document.createElement('video');
       vid.muted = true;
+      vid.crossOrigin = 'anonymous';
       vid.preload = 'auto';
       vid.onloadeddata = () => { vid.currentTime = 0.01; };
       vid.onseeked = () => {
@@ -586,10 +666,10 @@
         c.width = vid.videoWidth;
         c.height = vid.videoHeight;
         c.getContext('2d').drawImage(vid, 0, 0);
-        URL.revokeObjectURL(url);
+        if (isFile) URL.revokeObjectURL(url);
         resolve({ canvas: c, naturalWidth: vid.videoWidth, naturalHeight: vid.videoHeight });
       };
-      vid.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Frame extraction failed')); };
+      vid.onerror = () => { if (isFile) URL.revokeObjectURL(url); reject(new Error('Frame extraction failed')); };
       vid.src = url;
     });
   }
@@ -1260,8 +1340,22 @@
   const selectionListEl = document.getElementById('selectionList');
 
   let concatFile = null;
+  let concatLocalPath = null;
   let concatTimeline = null;
   let concatPreviewUrl = null;
+  document.getElementById('concatBrowseBtn').addEventListener('click', async () => {
+    const paths = await browseFiles('mov,mp4');
+    if (!paths.length) return;
+    const p = paths[0];
+    try {
+      const info = await probeLocalPath(p);
+      concatLocalPath = p;
+      concatFile = null;
+      concatFileInfo.textContent = `${info.filename} • ${(info.size/1e6).toFixed(1)} MB (local)`;
+      setHidden(concatFileInfo, false);
+      initConcatTimelineFromPath(info);
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
 
   concatDropzone.addEventListener('click', () => concatFileInput.click());
   
@@ -1284,7 +1378,7 @@
   concatDropzone.addEventListener('drop', (e) => {
     const files = [...(e.dataTransfer.files || [])].filter(isVideoFile);
     if (files.length) {
-      concatFile = files[0];
+      concatFile = files[0]; concatLocalPath = null;
       concatFileInfo.textContent = `${concatFile.name} • ${(concatFile.size/1e6).toFixed(2)} MB`;
       setHidden(concatFileInfo, false);
       initConcatTimeline();
@@ -1294,15 +1388,14 @@
   concatFileInput.addEventListener('change', () => {
     const files = [...(concatFileInput.files || [])].filter(isVideoFile);
     if (files.length) {
-      concatFile = files[0];
+      concatFile = files[0]; concatLocalPath = null;
       concatFileInfo.textContent = `${concatFile.name} • ${(concatFile.size/1e6).toFixed(2)} MB`;
       setHidden(concatFileInfo, false);
       initConcatTimeline();
     }
   });
 
-  function initConcatTimeline() {
-    if (!concatFile) return;
+  function ensureConcatTimeline() {
     if (!concatTimeline) {
       concatTimeline = new ConcatTimeline(
         concatTimelineContainer,
@@ -1315,13 +1408,23 @@
       );
     }
     setHidden(concatTimelineSection, false);
-    
+  }
+
+  function initConcatTimeline() {
+    if (!concatFile) return;
+    ensureConcatTimeline();
     getMediaDuration(concatFile).then(dur => {
       concatTimeline.setFile(concatFile, dur);
       concatPlayPauseBtn.disabled = false;
     }).catch(err => {
       console.error('Failed to get video duration:', err);
     });
+  }
+
+  function initConcatTimelineFromPath(info) {
+    ensureConcatTimeline();
+    concatTimeline.setLocalPath(concatLocalPath, info.duration);
+    concatPlayPauseBtn.disabled = false;
   }
 
   class ConcatTimeline {
@@ -1345,6 +1448,17 @@
 
     setFile(file, duration) {
       this.file = file;
+      this.localPath = null;
+      this.duration = duration;
+      this.selections = [];
+      this._render();
+      this._renderSelections();
+      this._loadPreview();
+    }
+
+    setLocalPath(localPath, duration) {
+      this.file = null;
+      this.localPath = localPath;
       this.duration = duration;
       this.selections = [];
       this._render();
@@ -1355,9 +1469,14 @@
     _loadPreview() {
       if (concatPreviewUrl) {
         URL.revokeObjectURL(concatPreviewUrl);
+        concatPreviewUrl = null;
       }
-      concatPreviewUrl = URL.createObjectURL(this.file);
-      this.previewVideo.src = concatPreviewUrl;
+      if (this.localPath) {
+        this.previewVideo.src = `/api/localfile?path=${encodeURIComponent(this.localPath)}`;
+      } else {
+        concatPreviewUrl = URL.createObjectURL(this.file);
+        this.previewVideo.src = concatPreviewUrl;
+      }
       this.previewVideo.currentTime = 0;
     }
 
@@ -1586,7 +1705,7 @@
   });
 
   concatExportBtn.addEventListener('click', async () => {
-    if (!concatTimeline || !concatFile) return;
+    if (!concatTimeline || (!concatFile && !concatLocalPath)) return;
     const selections = concatTimeline.getSelections();
     if (selections.length === 0) {
       alert('Please create at least one selection on the timeline');
@@ -1594,7 +1713,11 @@
     }
 
     const form = new FormData();
-    form.append('video', concatFile, concatFile.name);
+    if (concatLocalPath) {
+      form.append('filePath', concatLocalPath);
+    } else {
+      form.append('video', concatFile, concatFile.name);
+    }
     form.append('selections', JSON.stringify(selections));
     form.append('filename', sanitizeFilename('concatenated.mp4'));
 
@@ -1675,8 +1798,26 @@
   const speederExportBtn = document.getElementById('speederExportBtn');
 
   let speederFile = null;
+  let speederLocalPath = null;
   let speederOrigDuration = 0;
   let speederPreviewUrl = null;
+  document.getElementById('speederBrowseBtn').addEventListener('click', async () => {
+    const paths = await browseFiles('mov,mp4');
+    if (!paths.length) return;
+    const p = paths[0];
+    try {
+      const info = await probeLocalPath(p);
+      speederLocalPath = p;
+      speederFile = null;
+      speederFileInfo.textContent = `${info.filename} • ${(info.size/1e6).toFixed(1)} MB (local)`;
+      setHidden(speederFileInfo, false);
+      setHidden(speederSection, false);
+      speederPreviewVideo.src = `/api/localfile?path=${encodeURIComponent(p)}`;
+      speederOrigDuration = info.duration;
+      origDurationEl.textContent = formatTime(speederOrigDuration);
+      updateNewDuration();
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
 
   speederDropzone.addEventListener('click', () => speederFileInput.click());
 
@@ -1705,6 +1846,7 @@
 
   async function handleSpeederFile(file) {
     speederFile = file;
+    speederLocalPath = null;
     speederFileInfo.textContent = `${file.name} • ${(file.size/1e6).toFixed(2)} MB`;
     setHidden(speederFileInfo, false);
     setHidden(speederSection, false);
@@ -1728,12 +1870,16 @@
   speedFactorInput.addEventListener('input', updateNewDuration);
 
   speederExportBtn.addEventListener('click', async () => {
-    if (!speederFile) return;
+    if (!speederFile && !speederLocalPath) return;
     const factor = parseFloat(speedFactorInput.value) || 1.0;
     const lockFps = lockFpsCheckbox.checked;
 
     const form = new FormData();
-    form.append('video', speederFile, speederFile.name);
+    if (speederLocalPath) {
+      form.append('filePath', speederLocalPath);
+    } else {
+      form.append('video', speederFile, speederFile.name);
+    }
     form.append('speedFactor', String(factor));
     form.append('lockFps', String(lockFps));
     form.append('duration', String(speederOrigDuration));
@@ -1763,20 +1909,29 @@
             if (data.type === 'progress') {
               speederExportBtn.textContent = `Exporting ${data.percent}%`;
             } else if (data.type === 'complete') {
-              const binary = atob(data.data);
-              const bytes = new Uint8Array(binary.length);
-              for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
+              if (data.downloadUrl) {
+                const a = document.createElement('a');
+                a.href = data.downloadUrl;
+                a.download = data.filename || 'sped_up.mp4';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              } else if (data.data) {
+                const binary = atob(data.data);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                  bytes[i] = binary.charCodeAt(i);
+                }
+                const blob = new Blob([bytes], { type: 'video/mp4' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = data.filename || 'sped_up.mp4';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
               }
-              const blob = new Blob([bytes], { type: 'video/mp4' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = data.filename || 'sped_up.mp4';
-              document.body.appendChild(a);
-              a.click();
-              a.remove();
-              URL.revokeObjectURL(url);
             } else if (data.type === 'error') {
               throw new Error(data.error + (data.details ? ': ' + data.details : ''));
             }
@@ -1810,7 +1965,38 @@
 
   let timelapseTopFiles = []; // Array of { file, duration, speedFactor }
   let timelapseBottomFiles = [];
+  let timelapseTopLocalPath = null;
+  let timelapseBottomLocalPath = null;
   let timelapsePanes = {}; // PaneController instances for preview
+  document.getElementById('timelapseTopBrowseBtn').addEventListener('click', async () => {
+    const paths = await browseFiles('mov,mp4', true);
+    if (!paths.length) return;
+    try {
+      timelapseTopFiles = [];
+      for (const p of paths) {
+        const info = await probeLocalPath(p);
+        timelapseTopLocalPath = p;
+        timelapseTopFiles.push({ file: null, duration: info.duration, speedFactor: 1.0, localPath: p, filename: info.filename, size: info.size });
+      }
+      renderTimelapseList('top');
+      updateTimelapseTotals();
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
+
+  document.getElementById('timelapseBottomBrowseBtn').addEventListener('click', async () => {
+    const paths = await browseFiles('mov,mp4', true);
+    if (!paths.length) return;
+    try {
+      timelapseBottomFiles = [];
+      for (const p of paths) {
+        const info = await probeLocalPath(p);
+        timelapseBottomLocalPath = p;
+        timelapseBottomFiles.push({ file: null, duration: info.duration, speedFactor: 1.0, localPath: p, filename: info.filename, size: info.size });
+      }
+      renderTimelapseList('bottom');
+      updateTimelapseTotals();
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
 
   timelapseTopDropzone.addEventListener('click', () => timelapseTopFileInput.click());
   timelapseBottomDropzone.addEventListener('click', () => timelapseBottomFileInput.click());
@@ -1876,7 +2062,7 @@
       li.className = 'timelapse-item';
       li.innerHTML = `
         <div class="timelapse-item-header">
-          <span class="timelapse-item-name" title="${item.file.name}">${item.file.name}</span>
+          <span class="timelapse-item-name" title="${item.file ? item.file.name : item.filename}">${item.file ? item.file.name : item.filename}</span>
           <button class="timelapse-item-remove" data-idx="${idx}">×</button>
         </div>
         <div class="timelapse-item-controls">
@@ -1933,8 +2119,10 @@
       return;
     }
     try {
-      const topFrame = await extractFirstFrame(timelapseTopFiles[0].file);
-      const bottomFrame = await extractFirstFrame(timelapseBottomFiles[0].file);
+      const topSrc = timelapseTopFiles[0].file || `/api/localfile?path=${encodeURIComponent(timelapseTopFiles[0].localPath)}`;
+      const bottomSrc = timelapseBottomFiles[0].file || `/api/localfile?path=${encodeURIComponent(timelapseBottomFiles[0].localPath)}`;
+      const topFrame = await extractFirstFrame(topSrc);
+      const bottomFrame = await extractFirstFrame(bottomSrc);
 
       const doubleRes = timelapseDoubleResCheckbox.checked;
       const baseWidth = doubleRes ? 2160 : 1080;
@@ -1970,14 +2158,24 @@
     if (timelapseTopFiles.length === 0 || timelapseBottomFiles.length === 0) return;
 
     const form = new FormData();
-    timelapseTopFiles.forEach((item, i) => {
-      form.append(`top`, item.file, item.file.name);
-      form.append(`topFactors`, String(item.speedFactor));
-    });
-    timelapseBottomFiles.forEach((item, i) => {
-      form.append(`bottom`, item.file, item.file.name);
-      form.append(`bottomFactors`, String(item.speedFactor));
-    });
+    if (timelapseTopLocalPath && timelapseTopFiles.length === 1 && !timelapseTopFiles[0].file) {
+      form.append('topFilePath', timelapseTopLocalPath);
+      form.append('topFactors', String(timelapseTopFiles[0].speedFactor));
+    } else {
+      timelapseTopFiles.forEach((item) => {
+        form.append('top', item.file, item.file.name);
+        form.append('topFactors', String(item.speedFactor));
+      });
+    }
+    if (timelapseBottomLocalPath && timelapseBottomFiles.length === 1 && !timelapseBottomFiles[0].file) {
+      form.append('bottomFilePath', timelapseBottomLocalPath);
+      form.append('bottomFactors', String(timelapseBottomFiles[0].speedFactor));
+    } else {
+      timelapseBottomFiles.forEach((item) => {
+        form.append('bottom', item.file, item.file.name);
+        form.append('bottomFactors', String(item.speedFactor));
+      });
+    }
 
     form.append('doubleRes', String(timelapseDoubleResCheckbox.checked));
     const topNew = timelapseTopFiles.reduce((sum, item) => sum + (item.duration / item.speedFactor), 0);

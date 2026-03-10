@@ -45,6 +45,21 @@ body {
 }
 .dropzone:hover, .dropzone:focus { border-color: var(--accent); color: var(--text); }
 
+.browse-btn {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  background: #1a2028;
+  color: var(--muted);
+  padding: 8px 10px;
+  border: 1px dashed #2a3138;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+}
+.browse-btn:hover { border-color: var(--accent); color: var(--text); background: #1e2630; }
+
 .file-info {
   margin-top: 10px;
   color: var(--muted);
