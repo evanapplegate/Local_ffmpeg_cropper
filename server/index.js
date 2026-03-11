@@ -576,6 +576,93 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
   }
 });
 
+// Butt-joiner endpoint: joins multiple local file paths together in order
+app.post('/api/join', async (req, res) => {
+  let filePaths;
+  try {
+    filePaths = JSON.parse(req.body.filePaths || '[]');
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid filePaths JSON' });
+  }
+  if (!filePaths.length) return res.status(400).json({ error: 'No files provided' });
+
+  for (const p of filePaths) {
+    if (!fs.existsSync(p)) return res.status(400).json({ error: `File not found: ${p}` });
+  }
+
+  const clientFilename = (req.body.filename || 'joined').replace(/[^A-Za-z0-9_.-]/g, '_');
+  const outName = clientFilename.endsWith('.mp4') ? clientFilename : `${clientFilename}.mp4`;
+  const outputPath = path.join(TMP_DIR, `join_${Date.now()}.mp4`);
+  const listPath = path.join(TMP_DIR, `join_list_${Date.now()}.txt`);
+
+  log('JOIN start', { files: filePaths.map(p => path.basename(p)), outName });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const sendProgress = (pct) => res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
+
+  try {
+    // Probe fps of each file
+    const fpsValues = filePaths.map(p => {
+      const ff = spawnSync('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0',
+        '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', p], { encoding: 'utf8' });
+      const raw = (ff.stdout || '').trim(); // e.g. "30000/1001" or "30/1"
+      if (!raw) return null;
+      const [num, den] = raw.split('/').map(Number);
+      return den ? num / den : num;
+    });
+    const allMatch = fpsValues.every(f => f !== null && Math.abs(f - fpsValues[0]) < 0.01);
+    log('JOIN fps values:', fpsValues.map(f => f ? f.toFixed(3) : 'unknown').join(', '),
+        allMatch ? '→ stream copy' : '→ re-encode to 30fps');
+
+    fs.writeFileSync(listPath, filePaths.map(p => `file '${p}'`).join('\n'));
+    sendProgress(10);
+
+    const encodeArgs = allMatch
+      ? ['-c', 'copy']
+      : ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-r', '30', '-c:a', 'aac', '-b:a', '192k'];
+
+    const args = [
+      '-hide_banner', '-f', 'concat', '-safe', '0',
+      '-i', listPath,
+      ...encodeArgs, '-movflags', '+faststart',
+      '-y', outputPath
+    ];
+
+    log('JOIN ffmpeg:', args.join(' '));
+
+    await new Promise((resolve, reject) => {
+      const ff = spawn('ffmpeg', args);
+      let stderr = '';
+      const joinStderr = makeStderrLogger('JOIN');
+      ff.stderr.on('data', d => { stderr += d.toString(); joinStderr(d); });
+      ff.on('close', code => {
+        if (code === 0) resolve();
+        else reject(new Error(tail(stderr)));
+      });
+      ff.on('error', reject);
+    });
+
+    sendProgress(100);
+    fs.unlink(listPath, () => {});
+    const stat = fs.statSync(outputPath);
+    log('JOIN done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
+    const dlId = path.basename(outputPath);
+    pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => fs.unlink(outputPath, () => {}) });
+    res.write(`data: ${JSON.stringify({ type: 'complete', downloadUrl: `/api/download/${dlId}`, filename: outName })}\n\n`);
+    res.end();
+  } catch (err) {
+    log('JOIN failed', err.message);
+    fs.unlink(listPath, () => {});
+    if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
+    res.write(`data: ${JSON.stringify({ type: 'error', error: 'Join failed', details: err.message })}\n\n`);
+    res.end();
+  }
+});
+
 // Speedup endpoint: multipart form-data with fields: video, speedFactor, lockFps, filename
 app.post('/api/speedup', upload.single('video'), async (req, res) => {
   const videoFile = req.file;
@@ -749,10 +836,21 @@ app.post('/api/speedup', upload.single('video'), async (req, res) => {
 app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]), async (req, res) => {
   let topFiles = req.files && req.files.top;
   let bottomFiles = req.files && req.files.bottom;
+
+  log('TIMELAPSE body keys:', Object.keys(req.body || {}));
+
+  // Support local path arrays (new preferred path)
+  try {
+    const topPaths = req.body.topFilePaths ? JSON.parse(req.body.topFilePaths) : null;
+    const bottomPaths = req.body.bottomFilePaths ? JSON.parse(req.body.bottomFilePaths) : null;
+    log('TIMELAPSE parsed paths:', { topPaths, bottomPaths });
+    if (topPaths && !topFiles) topFiles = topPaths.map(p => ({ path: p, originalname: path.basename(p), size: 0 }));
+    if (bottomPaths && !bottomFiles) bottomFiles = bottomPaths.map(p => ({ path: p, originalname: path.basename(p), size: 0 }));
+  } catch (e) { log('TIMELAPSE path parse error:', e.message); }
+
+  // Legacy single-path support
   const topLocalPath = req.body.topFilePath;
   const bottomLocalPath = req.body.bottomFilePath;
-
-  // Support local paths: create fake file objects so processPane works unchanged
   if (topLocalPath && !topFiles) topFiles = [{ path: topLocalPath, originalname: path.basename(topLocalPath), size: 0 }];
   if (bottomLocalPath && !bottomFiles) bottomFiles = [{ path: bottomLocalPath, originalname: path.basename(bottomLocalPath), size: 0 }];
 
@@ -799,8 +897,6 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
 
   const intermediateFiles = [];
   const cleanup = () => {
-    if (!topLocalPath) topFiles.forEach(f => fs.unlink(f.path, () => {}));
-    if (!bottomLocalPath) bottomFiles.forEach(f => fs.unlink(f.path, () => {}));
     intermediateFiles.forEach(f => fs.unlink(f, () => {}));
   };
 

@@ -1,33 +1,66 @@
 # Local FFmpeg Cropper
 
-Drag & drop MP4s, crop visually with optional aspect locks (free, 1:1, 9:16 portrait), export to a cropped MP4. Runs ffmpeg locally via a Node server.
+A local video editing toolkit that runs entirely on your Mac — no uploads, no cloud, no subscriptions. Uses a small Node.js server to run ffmpeg and serve the browser UI.
 
-## Prerequisites
-- Node.js 16+
-- ffmpeg available on PATH (`ffmpeg -version`)
+## Requirements
 
-macOS (Homebrew):
+- **Node.js 16+** — [nodejs.org](https://nodejs.org)
+- **ffmpeg** — install via Homebrew:
+
 ```bash
 brew install ffmpeg
 ```
 
-## Install & Run
+Verify both are installed:
 ```bash
-npm install
-npm run dev
-# open http://localhost:3000
+node -v
+ffmpeg -version
 ```
 
-## Usage
-1. Drop one or more MP4 files onto the drop zone (or click to select).
-2. Adjust the crop rectangle; optionally choose an aspect lock.
-3. Click Export — the server runs ffmpeg and downloads the result.
+## Setup
 
-## Notes
-- Video: H.264 (`libx264`), `-crf 20`, `-preset veryfast`, audio copied.
-- Output is streamed; no file persists on the server.
-- Crop width/height are even to satisfy H.264 requirements.
+```bash
+git clone https://github.com/evanapplegate/Local_ffmpeg_cropper.git
+cd Local_ffmpeg_cropper
+npm install
+npm start
+```
+
+Then open **http://localhost:3000** in your browser.
+
+> **Tip:** Double-click `start.command` to launch without a terminal (make it executable first: `chmod +x start.command`).
+
+---
+
+## Tools
+
+### Video Cropper
+Browse an MP4 or MOV, drag the crop box to frame your shot, choose an aspect ratio (Free / 1:1 / 9:16 / 16:9), and export. The original file is read directly from disk — no upload wait.
+
+### Video-Audio Combiner
+Browse a video file and a separate audio file (MOV, MP4, MP3, WAV). Drag the blocks on the timeline to sync them up, select an output range, and export a merged MP4.
+
+### Video Clip Concatenator
+Browse a video, then drag on the timeline to mark one or more segments. Export them joined together in order.
+
+### Clip Butt-Joiner
+Browse multiple clips (you can select several at once in Finder), reorder them with the ↑/↓ buttons, and join into one file. Uses lossless stream copy when all clips have matching frame rates; otherwise re-encodes to 30fps automatically.
+
+### Video Speeder-Upper
+Browse a video, enter a speed multiplier (e.g. `4` for 4×, `0.5` for half speed), and export. Uses parallel seek-based frame extraction so even 70-minute files process in under 2 minutes.
+
+### Reel/LinkedIn Timelapser
+Browse a set of "top" videos and a set of "bottom" videos. Set per-clip speed factors, then preview the stacked layout in Square (1:1 for LinkedIn) and Reels (9:16) mockups. Drag within each pane to reposition the crop. Export both formats at once. Optional 4K (2160px wide) output.
+
+---
+
+## Tips
+
+- The **Server Log** panel at the bottom shows live ffmpeg output so you can see progress.
+- Use the **Light/Dark mode** toggle in the header.
+- All files are accessed by path — works great with large files (10GB+) since nothing is uploaded.
+- Exports download automatically when done.
 
 ## License
-MIT
 
+MIT
