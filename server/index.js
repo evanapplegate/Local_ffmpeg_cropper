@@ -1049,7 +1049,8 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
       '-i', topPanePath, '-i', bottomPanePath,
       '-filter_complex', liFilter,
       '-r', '30', '-c:v', 'libx264', '-crf', '10', '-preset', 'fast', '-pix_fmt', 'yuv420p',
-      '-an', '-movflags', '+faststart', '-y', liPath
+      '-maxrate', '5M', '-bufsize', '10M',
+      '-movflags', '+faststart', '-y', liPath
     ], 40, 0.3);
     
     sendProgress(70);

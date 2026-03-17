@@ -4,6 +4,7 @@ A local video editing toolkit that runs entirely on your Mac — no uploads, no 
 
 ## Requirements
 
+- **macOS** — uses native Finder dialogs via `osascript` (not compatible with Windows or Linux)
 - **Node.js 16+** — [nodejs.org](https://nodejs.org)
 - **ffmpeg** — install via Homebrew:
 

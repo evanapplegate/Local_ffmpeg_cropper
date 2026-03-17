@@ -13,24 +13,24 @@
 }
 
 body.light {
-  --bg: #f0f2f5;
+  --bg: #FEFAF6;
   --panel: #ffffff;
-  --text: #1a2028;
-  --muted: #5a6a78;
-  --accent: #1a7fd4;
-  --accent-2: #00a896;
-  --danger: #d63050;
-  --border: #c8d0d8;
-  --browse-bg: #e4e8ec;
-  --browse-hover: #d8dde3;
-  --track-bg: #e8ecf0;
+  --text: #2c2418;
+  --muted: #7a6e5f;
+  --accent: #c47a2a;
+  --accent-2: #2a8c7a;
+  --danger: #c43030;
+  --border: #ddd4c8;
+  --browse-bg: #f5ede3;
+  --browse-hover: #ece2d5;
+  --track-bg: #f2ebe2;
 }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
   margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+  font-family: Optima, "Optima Nova", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans";
   background: var(--bg);
   color: var(--text);
 }
@@ -69,6 +69,17 @@ body {
   cursor: pointer;
 }
 .theme-toggle:hover { color: var(--text); border-color: var(--accent); }
+
+.section-desc {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.drop h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
 
 .browse-btn {
   display: block;
