@@ -1,10 +1,10 @@
-# Local FFmpeg Cropper
+# Local FFmpeg Tools
 
-A local video editing toolkit that runs entirely on your Mac — no uploads, no cloud, no subscriptions. Uses a small Node.js server to run ffmpeg and serve the browser UI.
+Browser frontend for simple ffmpeg operations: crop, concatenate, timelapse, and make vertical- and square-cropped two-stack videos. Uses a small Node.js server to run ffmpeg and serve the browser UI.
 
 ## Requirements
 
-- **macOS** — uses native Finder dialogs via `osascript` (not compatible with Windows or Linux)
+- **macOS** — uses native Finder dialogs via `osascript` (OSX only)
 - **Node.js 16+** — [nodejs.org](https://nodejs.org)
 - **ffmpeg** — install via Homebrew:
 
@@ -36,7 +36,7 @@ Then open **http://localhost:3000** in your browser.
 ## Tools
 
 ### Video Cropper
-Browse an MP4 or MOV, drag the crop box to frame your shot, choose an aspect ratio (Free / 1:1 / 9:16 / 16:9), and export. The original file is read directly from disk — no upload wait.
+Browse an MP4 or MOV, drag the crop box, choose an aspect ratio (Free / 1:1 / 9:16 / 16:9), and export.
 
 ### Video-Audio Combiner
 Browse a video file and a separate audio file (MOV, MP4, MP3, WAV). Drag the blocks on the timeline to sync them up, select an output range, and export a merged MP4.
@@ -48,10 +48,10 @@ Browse a video, then drag on the timeline to mark one or more segments. Export t
 Browse multiple clips (you can select several at once in Finder), reorder them with the ↑/↓ buttons, and join into one file. Uses lossless stream copy when all clips have matching frame rates; otherwise re-encodes to 30fps automatically.
 
 ### Video Speeder-Upper
-Browse a video, enter a speed multiplier (e.g. `4` for 4×, `0.5` for half speed), and export. Uses parallel seek-based frame extraction so even 70-minute files process in under 2 minutes.
+Browse a video, enter a speed multiplier (e.g. `4` for 4x, `0.5` for half speed), and export. Uses parallel seek-based frame extraction so even 70-minute files process in under 2 minutes.
 
 ### Reel/LinkedIn Timelapser
-Browse a set of "top" videos and a set of "bottom" videos. Set per-clip speed factors, then preview the stacked layout in Square (1:1 for LinkedIn) and Reels (9:16) mockups. Drag within each pane to reposition the crop. Export both formats at once. Optional 4K (2160px wide) output.
+Browse a set of "top" videos and a set of "bottom" videos. Set per-clip speed factors, then preview the stacked layout in Square (1:1 for LinkedIn) and Reels (9:16) mockups. Drag within each pane to reposition the crop, scroll wheel zooms in and out. Export both formats at once. Optional 4K (2160px wide) output.
 
 ---
 
