@@ -234,6 +234,27 @@
           <div id="timelapseLog" class="verbose-log" hidden></div>
         </div>
       </section>
+      <section class="shrinker" id="shrinker">
+        <h2>Video Shrinker</h2>
+        <p class="section-desc">Re-encode to 1920px wide (height proportional) with slow preset for smaller file size.</p>
+
+        <div class="drop-container">
+          <button id="shrinkerBrowseBtn" class="browse-btn">Browse Finder...</button>
+          <div id="shrinkerFileInfo" class="file-info-small" hidden></div>
+        </div>
+
+        <div class="shrinker-controls-section" id="shrinkerSection" hidden>
+          <div class="controls speeder-controls">
+            <div class="speed-info" id="shrinkerInfo"></div>
+            <button id="shrinkerExportBtn" class="primary">Shrink & Export</button>
+          </div>
+
+          <div class="preview-wrap speeder-preview">
+            <video id="shrinkerPreviewVideo" playsinline controls></video>
+          </div>
+        </div>
+      </section>
+
     </div>
 
     <div id="logPanel" class="log-panel">

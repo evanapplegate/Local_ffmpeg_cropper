@@ -214,8 +214,9 @@ app.post('/api/crop', upload.single('video'), (req, res) => {
   const evenHExpr = `max(2,floor(min(${h},ih-${y})/2)*2)`;
   const esc = (s) => String(s).replace(/,/g, '\\,');
   const cropExpr = `crop=${esc(evenWExpr)}:${esc(evenHExpr)}:${x}:${y}`;
+  const outputPath = path.join(TMP_DIR, `crop_${Date.now()}.mp4`);
   const args = [
-    '-hide_banner',
+    '-hide_banner', '-progress', 'pipe:2',
     '-i', uploadedPath,
     '-vf', cropExpr,
     '-map', '0:v:0',
@@ -224,15 +225,17 @@ app.post('/api/crop', upload.single('video'), (req, res) => {
     '-preset', 'veryfast',
     '-crf', '20',
     '-c:a', 'copy',
-    '-movflags', 'frag_keyframe+empty_moov',
-    '-f', 'mp4',
-    'pipe:1'
+    '-movflags', '+faststart',
+    '-y', outputPath
   ];
   log('CROP spawning ffmpeg:', 'ffmpeg', args.join(' '));
 
-  const ff = spawn('ffmpeg', args);
-  let wroteVideo = false;
-  let stderrBuf = '';
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const sendProgress = (pct) => res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
 
   const cleanup = () => {
     if (!isLocal && uploadedPath) {
@@ -240,31 +243,40 @@ app.post('/api/crop', upload.single('video'), (req, res) => {
     }
   };
 
-  ff.stdout.on('data', (chunk) => {
-    if (!wroteVideo) {
-      log('CROP first video chunk received, streaming response...');
-      res.setHeader('Content-Type', 'video/mp4');
-      res.setHeader('Content-Disposition', `attachment; filename="${outName}"`);
-      wroteVideo = true;
-    }
-    res.write(chunk);
-  });
+  // Get duration for progress
+  const probe = spawnSync('ffprobe', ['-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', uploadedPath], { encoding: 'utf8' });
+  const totalDuration = parseFloat(probe.stdout) || 0;
+
+  const ff = spawn('ffmpeg', args);
+  let stderrBuf = '';
   const cropStderr = makeStderrLogger('CROP');
+
   ff.stderr.on('data', (d) => {
-    stderrBuf += d.toString();
+    const chunk = d.toString();
+    stderrBuf += chunk;
     cropStderr(d);
+    if (totalDuration > 0) {
+      const match = chunk.match(/out_time_ms=(\d+)/);
+      if (match) {
+        const pct = Math.min(95, Math.round((parseInt(match[1]) / 1000000 / totalDuration) * 100));
+        sendProgress(pct);
+      }
+    }
   });
 
   ff.on('close', (code) => {
     cleanup();
-    log('CROP ffmpeg exited code=' + code, 'wroteVideo=' + wroteVideo, 'stderrTail=', tail(stderrBuf));
-    if (!wroteVideo) {
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'ffmpeg failed before producing output', details: tail(stderrBuf) });
-      } else {
-        res.end();
-      }
-      return;
+    if (code === 0 && fs.existsSync(outputPath)) {
+      const stat = fs.statSync(outputPath);
+      log('CROP done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
+      sendProgress(100);
+      const dlId = path.basename(outputPath);
+      pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => fs.unlink(outputPath, () => {}) });
+      res.write(`data: ${JSON.stringify({ type: 'complete', downloadUrl: `/api/download/${dlId}`, filename: outName })}\n\n`);
+    } else {
+      log('CROP failed, code=' + code, tail(stderrBuf));
+      res.write(`data: ${JSON.stringify({ type: 'error', error: 'Crop failed', details: tail(stderrBuf) })}\n\n`);
+      if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
     }
     res.end();
   });
@@ -272,17 +284,8 @@ app.post('/api/crop', upload.single('video'), (req, res) => {
   ff.on('error', (err) => {
     cleanup();
     log('ERROR failed to start ffmpeg', err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to start ffmpeg', details: err.message });
-    } else {
-      res.end();
-    }
-  });
-
-  // Abort handling
-  res.on('close', () => {
-    try { ff.kill('SIGKILL'); } catch (_) {}
-    cleanup();
+    res.write(`data: ${JSON.stringify({ type: 'error', error: 'Failed to start ffmpeg', details: err.message })}\n\n`);
+    res.end();
   });
 });
 
@@ -317,8 +320,13 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
   // Calculate file positions from timeline positions
   // Timeline position T -> Video file time = T - videoOffset
   // Timeline position T -> Audio file time = T - audioOffset
-  const videoStart = Math.max(0, startTime - videoOffset);
-  const audioStart = Math.max(0, startTime - audioOffset);
+  // Always output the full video — start at frame 0, end at last frame
+  const vProbe = spawnSync('ffprobe', ['-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', videoPath], { encoding: 'utf8' });
+  const videoDuration = parseFloat(vProbe.stdout) || duration;
+  const videoStart = 0;
+  const clampedDuration = videoDuration;
+  // Audio start = where in the audio file corresponds to video frame 0
+  const audioStart = Math.max(0, videoOffset - audioOffset);
 
   log('COMBINE start', {
     video: videoLocalPath || (videoFile && videoFile.originalname),
@@ -339,21 +347,18 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
   const args = [
     '-hide_banner',
     '-progress', 'pipe:2',
-    '-ss', String(videoStart),
-    '-t', String(duration),
     '-i', videoPath,
-    '-ss', String(audioStart),
-    '-t', String(duration),
     '-i', audioPath,
-    '-map', '0:v:0',
-    '-map', '1:a:0',
-    '-af', 'afade=t=in:st=0:d=1.5',
+    '-filter_complex',
+    `[0:v]trim=start=${videoStart}:duration=${clampedDuration},setpts=PTS-STARTPTS[v];` +
+    `[1:a]atrim=start=${audioStart}:duration=${clampedDuration},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.5[a]`,
+    '-map', '[v]',
+    '-map', '[a]',
     '-c:v', 'libx264',
     '-preset', 'slow',
     '-crf', '23',
     '-c:a', 'aac',
     '-b:a', '192k',
-    '-shortest',
     '-movflags', '+faststart',
     '-y',
     outputPath
@@ -573,6 +578,80 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: 'error', error: 'Concatenation failed', details: err.message })}\n\n`);
     res.end();
     cleanup();
+  }
+});
+
+// Shrinker endpoint: re-encode at reduced resolution
+app.post('/api/shrink', upload.none(), async (req, res) => {
+  const filePath = req.body.filePath;
+  if (!filePath || !fs.existsSync(filePath)) return res.status(400).json({ error: 'File not found' });
+
+  const clientFilename = (req.body.filename || 'shrunk').replace(/[^A-Za-z0-9_.-]/g, '_');
+  const outName = clientFilename.endsWith('.mp4') ? clientFilename : `${clientFilename}.mp4`;
+  const outputPath = path.join(TMP_DIR, `shrink_${Date.now()}.mp4`);
+
+  log('SHRINK start', { file: path.basename(filePath), outName });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const sendProgress = (pct) => res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
+
+  try {
+    sendProgress(5);
+    const args = [
+      '-hide_banner', '-progress', 'pipe:2',
+      '-i', filePath,
+      '-vf', 'scale=1920:-2:flags=lanczos',
+      '-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '128k',
+      '-movflags', '+faststart',
+      '-y', outputPath
+    ];
+
+    log('SHRINK ffmpeg:', args.join(' '));
+
+    // Get duration for progress
+    const probe = spawnSync('ffprobe', ['-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath], { encoding: 'utf8' });
+    const totalDuration = parseFloat(probe.stdout) || 0;
+
+    await new Promise((resolve, reject) => {
+      const ff = spawn('ffmpeg', args);
+      let stderr = '';
+      const shrinkStderr = makeStderrLogger('SHRINK');
+      ff.stderr.on('data', d => {
+        const chunk = d.toString();
+        stderr += chunk;
+        shrinkStderr(d);
+        if (totalDuration > 0) {
+          const match = chunk.match(/out_time_ms=(\d+)/);
+          if (match) {
+            const pct = Math.min(95, Math.round((parseInt(match[1]) / 1000000 / totalDuration) * 100));
+            sendProgress(pct);
+          }
+        }
+      });
+      ff.on('close', code => {
+        if (code === 0) resolve();
+        else reject(new Error(tail(stderr)));
+      });
+      ff.on('error', reject);
+    });
+
+    sendProgress(100);
+    const stat = fs.statSync(outputPath);
+    log('SHRINK done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
+    const dlId = path.basename(outputPath);
+    pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => fs.unlink(outputPath, () => {}) });
+    res.write(`data: ${JSON.stringify({ type: 'complete', downloadUrl: `/api/download/${dlId}`, filename: outName })}\n\n`);
+    res.end();
+  } catch (err) {
+    log('SHRINK failed', err.message);
+    if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
+    res.write(`data: ${JSON.stringify({ type: 'error', error: 'Shrink failed', details: err.message })}\n\n`);
+    res.end();
   }
 });
 

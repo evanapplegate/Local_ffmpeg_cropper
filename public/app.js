@@ -74,29 +74,54 @@
     if (!cropperLocalPath || !cropper) return;
     const rect = cropper.getCropInSourcePixels();
     if (!rect) return;
+
+    const form = new FormData();
+    form.append('filePath', cropperLocalPath);
+    form.append('x', String(rect.x));
+    form.append('y', String(rect.y));
+    form.append('w', String(rect.w));
+    form.append('h', String(rect.h));
+    form.append('filename', sanitizeFilename(outName.value));
+
+    exportBtn.disabled = true;
+    exportBtn.textContent = 'Exporting 0%';
+
     try {
-      const form = new FormData();
-      form.append('filePath', cropperLocalPath);
-      form.append('x', String(rect.x));
-      form.append('y', String(rect.y));
-      form.append('w', String(rect.w));
-      form.append('h', String(rect.h));
-      form.append('filename', sanitizeFilename(outName.value));
-
-      exportBtn.disabled = true;
-      exportBtn.textContent = 'Exporting…';
-
       const resp = await fetch('/api/crop', { method: 'POST', body: form });
-      if (!resp.ok) throw new Error(`Export failed (${resp.status})`);
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = sanitizeFilename(outName.value);
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            if (d.type === 'progress') {
+              exportBtn.textContent = `Exporting ${d.percent}%`;
+            } else if (d.type === 'complete') {
+              if (d.downloadUrl) {
+                const a = document.createElement('a');
+                a.href = d.downloadUrl;
+                a.download = d.filename || 'cropped.mp4';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              }
+            } else if (d.type === 'error') {
+              throw new Error(d.error + (d.details ? ': ' + d.details : ''));
+            }
+          } catch (e) {
+            if (e.message && !e.message.includes('JSON')) throw e;
+          }
+        }
+      }
     } catch (err) {
       alert(err.message || String(err));
     } finally {
@@ -1979,6 +2004,115 @@
     } finally {
       timelapseExportBtn.disabled = false;
       timelapseExportBtn.textContent = 'Export Timelapses';
+    }
+  });
+})();
+
+// ========== SHRINKER ==========
+(function() {
+  const shrinkerFileInfo = document.getElementById('shrinkerFileInfo');
+  const shrinkerSection = document.getElementById('shrinkerSection');
+  const shrinkerPreviewVideo = document.getElementById('shrinkerPreviewVideo');
+  const shrinkerExportBtn = document.getElementById('shrinkerExportBtn');
+  const shrinkerInfo = document.getElementById('shrinkerInfo');
+
+  let shrinkerLocalPath = null;
+  let shrinkerOrigSize = 0;
+  let shrinkerOrigW = 0;
+  let shrinkerOrigH = 0;
+
+  function setHidden(el, hidden) {
+    if (hidden) el.setAttribute('hidden', '');
+    else el.removeAttribute('hidden');
+  }
+
+  function updateInfo() {
+    const newH = Math.round(shrinkerOrigH * (1920 / shrinkerOrigW));
+    shrinkerInfo.textContent = `${shrinkerOrigW}x${shrinkerOrigH} → 1920x${newH} • ${(shrinkerOrigSize / 1e6).toFixed(1)} MB original`;
+  }
+
+  document.getElementById('shrinkerBrowseBtn').addEventListener('click', async () => {
+    const resp = await fetch('/api/browse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accept: 'mov,mp4', multiple: false })
+    });
+    const data = await resp.json();
+    if (data.canceled || !data.paths || !data.paths.length) return;
+    const p = data.paths[0];
+    try {
+      const probeResp = await fetch('/api/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: p })
+      });
+      if (!probeResp.ok) throw new Error('Probe failed');
+      const info = await probeResp.json();
+      shrinkerLocalPath = p;
+      shrinkerOrigSize = info.size;
+      shrinkerOrigW = info.width;
+      shrinkerOrigH = info.height;
+      shrinkerFileInfo.textContent = `${info.filename} • ${(info.size / 1e6).toFixed(1)} MB`;
+      setHidden(shrinkerFileInfo, false);
+      setHidden(shrinkerSection, false);
+      shrinkerPreviewVideo.src = `/api/localfile?path=${encodeURIComponent(p)}`;
+      updateInfo();
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
+
+  shrinkerExportBtn.addEventListener('click', async () => {
+    if (!shrinkerLocalPath) return;
+
+    const form = new FormData();
+    form.append('filePath', shrinkerLocalPath);
+    const baseName = shrinkerLocalPath.split('/').pop().replace(/\.[^.]+$/, '');
+    form.append('filename', `${baseName}_1920.mp4`);
+
+    shrinkerExportBtn.disabled = true;
+    shrinkerExportBtn.textContent = 'Shrinking 0%';
+
+    try {
+      const resp = await fetch('/api/shrink', { method: 'POST', body: form });
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            if (d.type === 'progress') {
+              shrinkerExportBtn.textContent = `Shrinking ${d.percent}%`;
+            } else if (d.type === 'complete') {
+              if (d.downloadUrl) {
+                const a = document.createElement('a');
+                a.href = d.downloadUrl;
+                a.download = d.filename || 'shrunk.mp4';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              }
+            } else if (d.type === 'error') {
+              throw new Error(d.error + (d.details ? ': ' + d.details : ''));
+            }
+          } catch (e) {
+            if (e.message && !e.message.includes('JSON')) throw e;
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Shrinker error:', err);
+      alert(err.message || String(err));
+    } finally {
+      shrinkerExportBtn.disabled = false;
+      shrinkerExportBtn.textContent = 'Shrink & Export';
     }
   });
 })();
