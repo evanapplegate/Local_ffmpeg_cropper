@@ -7,12 +7,39 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
+    <button id="restartBtn" class="restart-btn" title="Kill all processes and restart the server">⟳ Kill & Restart</button>
     <div class="container">
       <header class="header">
         <h1>Local FFmpeg Cropper</h1>
         <p>Browse files, crop &amp; combine — runs ffmpeg locally.</p>
         <button id="themeToggleBtn" class="theme-toggle">Light Mode</button>
       </header>
+
+      <section class="padder" id="padder">
+        <h2>Image Padder</h2>
+        <p class="section-desc">Browse a JPG, PNG or GIF. Samples the single-color edge at the image perimeter and pads the canvas out with it.</p>
+
+        <div class="drop-container">
+          <button id="padderBrowseBtn" class="browse-btn">Browse Finder...</button>
+          <div id="padderFileInfo" class="file-info-small" hidden></div>
+        </div>
+
+        <div id="padderSection" hidden>
+          <div class="controls speeder-controls">
+            <div class="control-group padder-slider-group">
+              <label for="padPct">% padding: <span id="padPctLabel">100%</span></label>
+              <input id="padPct" type="range" min="100" max="500" step="5" value="100">
+            </div>
+            <label class="checkbox-label"><input type="checkbox" id="padForceSquare"> Force square</label>
+            <div class="speed-info" id="padderInfo"></div>
+            <button id="padderExportBtn" class="primary">Pad &amp; Export</button>
+          </div>
+
+          <div class="padder-preview" id="padderPreviewBox">
+            <img id="padderPreviewImg" alt="Padded preview">
+          </div>
+        </div>
+      </section>
 
       <section class="drop">
         <h2>Video Cropper</h2>
@@ -33,6 +60,7 @@
           <div class="control-group">
             <label for="outName">Output name:</label>
             <input id="outName" type="text" placeholder="output.mp4">
+            <label class="checkbox-label"><input type="checkbox" id="cropFaststart"> Faststart</label>
             <button id="exportBtn" class="primary">Export Crop</button>
           </div>
         </div>
@@ -57,7 +85,7 @@
           </div>
 
           <div class="drop-container">
-            <button id="combinerAudioBrowseBtn" class="browse-btn">Browse Audio (MOV/MP4/MP3/WAV)...</button>
+            <button id="combinerAudioBrowseBtn" class="browse-btn">Browse Audio (MOV/MP4/MP3/WAV/M4A)...</button>
             <div id="audioFileInfo" class="file-info-small" hidden></div>
           </div>
         </div>
@@ -87,6 +115,8 @@
             </div>
             <div class="combiner-controls">
               <button id="previewPlayPauseBtn" class="primary" disabled>Play</button>
+              <label class="checkbox-label">Video speed (e.g. 2 for 2x): <input id="combineVideoSpeed" type="number" step="0.1" min="0.1" value="1.0" class="small-input"></label>
+              <label class="checkbox-label"><input type="checkbox" id="combineFaststart"> Faststart</label>
               <button id="combineExportBtn" class="primary" disabled>Export MP4</button>
             </div>
           </div>
@@ -124,6 +154,7 @@
             </div>
             <div class="combiner-controls">
               <button id="concatPlayPauseBtn" class="primary" disabled>Play</button>
+              <label class="checkbox-label"><input type="checkbox" id="concatFaststart"> Faststart (web streaming)</label>
               <button id="concatExportBtn" class="primary" disabled>Concatenate Selected</button>
             </div>
           </div>
@@ -142,6 +173,7 @@
         <div id="joinerSection" hidden>
           <ul id="joinerList" class="joiner-list"></ul>
           <div class="joiner-export-row">
+            <label class="checkbox-label"><input type="checkbox" id="joinFaststart"> Faststart (web streaming)</label>
             <button id="joinerExportBtn" class="primary">Join & Export</button>
           </div>
           <div id="joinerProgress" class="joiner-progress" hidden>
@@ -156,8 +188,10 @@
         <p class="section-desc">Set a speed multiplier and export. Fast even on long files.</p>
 
         <div class="drop-container">
+          <label class="checkbox-label"><input type="checkbox" id="speederBatchMode"> Batch mode (multiple files, processed serially)</label>
           <button id="speederBrowseBtn" class="browse-btn">Browse Finder...</button>
           <div id="speederFileInfo" class="file-info-small" hidden></div>
+          <ul id="speederBatchList" class="joiner-list" hidden></ul>
         </div>
 
         <div class="speeder-controls-section" id="speederSection" hidden>
@@ -172,6 +206,7 @@
             <div class="speed-info" id="speedInfo">
               Original: <span id="origDuration">0:00</span> → New: <span id="newDuration">0:00</span>
             </div>
+            <label class="checkbox-label"><input type="checkbox" id="speedFaststart"> Faststart</label>
             <button id="speederExportBtn" class="primary">Speed Up & Export</button>
           </div>
 
@@ -207,6 +242,7 @@
             <div class="control-group">
               <label><input type="checkbox" id="timelapseDoubleRes"> Double Resolution (4K)</label>
             </div>
+            <label class="checkbox-label"><input type="checkbox" id="timelapseFaststart"> Faststart</label>
             <button id="timelapseExportBtn" class="primary" disabled>Export Timelapses</button>
           </div>
 
@@ -246,11 +282,37 @@
         <div class="shrinker-controls-section" id="shrinkerSection" hidden>
           <div class="controls speeder-controls">
             <div class="speed-info" id="shrinkerInfo"></div>
+            <label class="checkbox-label"><input type="checkbox" id="shrinkFaststart"> Faststart</label>
             <button id="shrinkerExportBtn" class="primary">Shrink & Export</button>
           </div>
 
           <div class="preview-wrap speeder-preview">
             <video id="shrinkerPreviewVideo" playsinline controls></video>
+          </div>
+        </div>
+      </section>
+
+      <section class="flipper" id="flipper">
+        <h2>Video Flipper</h2>
+        <p class="section-desc">Browse a video, flip it horizontally and/or vertically, and re-export.</p>
+
+        <div class="drop-container">
+          <button id="flipBrowseBtn" class="browse-btn">Browse Finder...</button>
+          <div id="flipFileInfo" class="file-info-small" hidden></div>
+        </div>
+
+        <div class="flipper-controls-section" id="flipSection" hidden>
+          <div class="controls speeder-controls">
+            <div class="control-group">
+              <label class="checkbox-label"><input type="checkbox" id="flipH"> Flip Horizontal</label>
+              <label class="checkbox-label"><input type="checkbox" id="flipV"> Flip Vertical</label>
+            </div>
+            <label class="checkbox-label"><input type="checkbox" id="flipFaststart"> Faststart</label>
+            <button id="flipExportBtn" class="primary">Flip & Export</button>
+          </div>
+
+          <div class="preview-wrap speeder-preview">
+            <video id="flipPreviewVideo" playsinline controls></video>
           </div>
         </div>
       </section>

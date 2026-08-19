@@ -52,6 +52,25 @@ function makeStderrLogger(prefix, intervalMs = 500) {
 
 const upload = multer({ dest: TMP_DIR });
 
+// Source frame rate as an ffmpeg-friendly ratio string (e.g. "30000/1001").
+// Used to force CFR output on re-encodes: VFR sources (screen recordings,
+// iPhone captures) otherwise carry variable timestamps into the output, which
+// QuickTime plays with slow-motion stretches. Prefers avg_frame_rate (true
+// frames/duration), falls back to r_frame_rate, then 30.
+function probeFps(filePath, fallback = '30') {
+  for (const entry of ['avg_frame_rate', 'r_frame_rate']) {
+    const ff = spawnSync('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0',
+      '-show_entries', `stream=${entry}`, '-of', 'csv=p=0', filePath],
+      { encoding: 'utf8', timeout: 10000 });
+    const raw = ((ff.stdout || '').trim().split('\n')[0] || '').trim();
+    if (!raw) continue;
+    const [num, den] = raw.split('/').map(Number);
+    const v = den ? num / den : num;
+    if (Number.isFinite(v) && v >= 1 && v <= 240) return raw;
+  }
+  return fallback;
+}
+
 // ffmpeg sanity check
 try {
   const check = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8' });
@@ -75,6 +94,23 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Health check
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
+
+// Kill all processes and restart the server (dev convenience)
+app.post('/api/restart', (req, res) => {
+  log('RESTART requested — killing all processes and restarting server');
+  res.json({ ok: true });
+  const root = path.join(__dirname, '..');
+  const script = `
+    sleep 1
+    pkill -f "node server/index.js" 2>/dev/null || true
+    pkill -f "ffmpeg" 2>/dev/null || true
+    pkill -f "ffprobe" 2>/dev/null || true
+    sleep 1
+    cd "${root}" && nohup node server/index.js > /dev/null 2>&1 &
+  `;
+  const helper = spawn('bash', ['-c', script], { detached: true, stdio: 'ignore' });
+  helper.unref();
+});
 
 // Live log stream
 app.get('/api/logs', (req, res) => {
@@ -215,10 +251,11 @@ app.post('/api/crop', upload.single('video'), (req, res) => {
   const esc = (s) => String(s).replace(/,/g, '\\,');
   const cropExpr = `crop=${esc(evenWExpr)}:${esc(evenHExpr)}:${x}:${y}`;
   const outputPath = path.join(TMP_DIR, `crop_${Date.now()}.mp4`);
+  const cropFps = probeFps(uploadedPath);
   const args = [
     '-hide_banner', '-progress', 'pipe:2',
     '-i', uploadedPath,
-    '-vf', cropExpr,
+    '-vf', `${cropExpr},fps=${cropFps}`,
     '-map', '0:v:0',
     '-map', '0:a?',
     '-c:v', 'libx264',
@@ -325,6 +362,10 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
   const videoDuration = parseFloat(vProbe.stdout) || duration;
   const videoStart = 0;
   const clampedDuration = videoDuration;
+  // Speed up the video input (1 = no change). Audio stays at normal speed and is
+  // trimmed to match the sped-up video length.
+  const videoSpeed = Math.max(0.1, parseFloatSafe(req.body.videoSpeed, 1));
+  const outDuration = clampedDuration / videoSpeed;
   // Audio start = where in the audio file corresponds to video frame 0
   const audioStart = Math.max(0, videoOffset - audioOffset);
 
@@ -336,6 +377,8 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
     startTime,
     endTime,
     duration,
+    videoSpeed,
+    outDuration,
     videoStart,
     audioStart
   });
@@ -350,8 +393,8 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
     '-i', videoPath,
     '-i', audioPath,
     '-filter_complex',
-    `[0:v]trim=start=${videoStart}:duration=${clampedDuration},setpts=PTS-STARTPTS[v];` +
-    `[1:a]atrim=start=${audioStart}:duration=${clampedDuration},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.5[a]`,
+    `[0:v]trim=start=${videoStart}:duration=${clampedDuration},setpts=(PTS-STARTPTS)/${videoSpeed},fps=${probeFps(videoPath)}[v];` +
+    `[1:a]atrim=start=${audioStart}:duration=${outDuration},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1.5[a]`,
     '-map', '[v]',
     '-map', '[a]',
     '-c:v', 'libx264',
@@ -393,7 +436,7 @@ app.post('/api/combine', upload.fields([{ name: 'video', maxCount: 1 }, { name: 
     if (timeMatch) {
       const lastMatch = timeMatch[timeMatch.length - 1];
       const ms = parseInt(lastMatch.split('=')[1], 10);
-      const pct = Math.min(99, Math.round((ms / 1000 / duration) * 100));
+      const pct = Math.min(99, Math.round((ms / 1000 / outDuration) * 100));
       sendProgress(pct);
     }
   });
@@ -465,6 +508,7 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
   const outName = clientFilename.endsWith('.mp4') ? clientFilename : `${clientFilename}.mp4`;
   const outputPath = path.join(TMP_DIR, `concat_${Date.now()}.mp4`);
   const concatListPath = path.join(TMP_DIR, `concat_list_${Date.now()}.txt`);
+  const wantFaststart = req.body.faststart === '1';
   const clipPaths = [];
 
   log('CONCAT start', {
@@ -485,10 +529,14 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
   };
 
+  const rawOutputPath = outputPath + '.tmp.mp4';
   const cleanup = () => {
+    log('CONCAT cleanup: removing temp files');
     if (!concatLocalPath && videoFile && videoFile.path) fs.unlink(videoFile.path, () => {});
     clipPaths.forEach(p => fs.unlink(p, () => {}));
     fs.unlink(concatListPath, () => {});
+    fs.unlink(rawOutputPath, () => {});
+    fs.unlink(outputPath, () => {});
   };
 
   try {
@@ -536,16 +584,16 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
     const concatList = clipPaths.map(p => `file '${p}'`).join('\n');
     fs.writeFileSync(concatListPath, concatList);
 
-    // Step 3: Concatenate clips (stream copy — same source, no re-encode needed)
+    // Step 3: Concatenate clips (stream copy — no re-encode)
+    const concatDest = wantFaststart ? rawOutputPath : outputPath;
     const concatArgs = [
       '-hide_banner',
       '-f', 'concat',
       '-safe', '0',
       '-i', concatListPath,
       '-c', 'copy',
-      '-movflags', '+faststart',
       '-y',
-      outputPath
+      concatDest
     ];
 
     log('CONCAT joining clips, spawning ffmpeg:', concatArgs.join(' '));
@@ -562,6 +610,41 @@ app.post('/api/concat', upload.single('video'), async (req, res) => {
       });
       ff.on('error', reject);
     });
+
+    // Free disk space: delete temp clips before faststart pass
+    clipPaths.forEach(p => fs.unlink(p, () => {}));
+    clipPaths.length = 0;
+    fs.unlink(concatListPath, () => {});
+
+    if (wantFaststart) {
+      sendProgress(75);
+
+      // Faststart pass (moves moov atom; needs ~2x file size in free space)
+      const fastArgs = [
+        '-hide_banner',
+        '-i', rawOutputPath,
+        '-c', 'copy',
+        '-movflags', '+faststart',
+        '-y',
+        outputPath
+      ];
+
+      log('CONCAT faststart pass:', fastArgs.join(' '));
+
+      await new Promise((resolve, reject) => {
+        const ff = spawn('ffmpeg', fastArgs);
+        let stderr = '';
+        const fsStderr = makeStderrLogger('CONCAT faststart');
+        ff.stderr.on('data', d => { stderr += d.toString(); fsStderr(d); });
+        ff.on('close', code => {
+          fs.unlink(rawOutputPath, () => {});
+          log('CONCAT faststart ffmpeg exited code=' + code);
+          if (code === 0) resolve();
+          else reject(new Error(`Faststart failed: ${tail(stderr)}`));
+        });
+        ff.on('error', reject);
+      });
+    }
 
     sendProgress(100);
 
@@ -604,7 +687,7 @@ app.post('/api/shrink', upload.none(), async (req, res) => {
     const args = [
       '-hide_banner', '-progress', 'pipe:2',
       '-i', filePath,
-      '-vf', 'scale=1920:-2:flags=lanczos',
+      '-vf', `scale=1920:-2:flags=lanczos,fps=${probeFps(filePath)}`,
       '-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-b:a', '128k',
       '-movflags', '+faststart',
@@ -655,6 +738,197 @@ app.post('/api/shrink', upload.none(), async (req, res) => {
   }
 });
 
+// Flip endpoint: fields filePath, hflip ('1'/'0'), vflip ('1'/'0'), filename
+app.post('/api/flip', upload.none(), async (req, res) => {
+  const filePath = req.body.filePath;
+  if (!filePath || !fs.existsSync(filePath)) return res.status(400).json({ error: 'File not found' });
+
+  const hflip = req.body.hflip === '1';
+  const vflip = req.body.vflip === '1';
+  if (!hflip && !vflip) return res.status(400).json({ error: 'Select at least one flip direction' });
+
+  const filters = [];
+  if (hflip) filters.push('hflip');
+  if (vflip) filters.push('vflip');
+  filters.push(`fps=${probeFps(filePath)}`);
+
+  const clientFilename = (req.body.filename || 'flipped').replace(/[^A-Za-z0-9_.-]/g, '_');
+  const outName = clientFilename.endsWith('.mp4') ? clientFilename : `${clientFilename}.mp4`;
+  const outputPath = path.join(TMP_DIR, `flip_${Date.now()}.mp4`);
+
+  log('FLIP start', { file: path.basename(filePath), filters, outName });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const sendProgress = (pct) => res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
+
+  try {
+    sendProgress(5);
+    const args = [
+      '-hide_banner', '-progress', 'pipe:2',
+      '-i', filePath,
+      '-vf', filters.join(','),
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+      '-c:a', 'copy',
+      '-movflags', '+faststart',
+      '-y', outputPath
+    ];
+
+    log('FLIP ffmpeg:', args.join(' '));
+
+    const probe = spawnSync('ffprobe', ['-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath], { encoding: 'utf8' });
+    const totalDuration = parseFloat(probe.stdout) || 0;
+
+    await new Promise((resolve, reject) => {
+      const ff = spawn('ffmpeg', args);
+      let stderr = '';
+      const flipStderr = makeStderrLogger('FLIP');
+      ff.stderr.on('data', d => {
+        const chunk = d.toString();
+        stderr += chunk;
+        flipStderr(d);
+        if (totalDuration > 0) {
+          const match = chunk.match(/out_time_ms=(\d+)/);
+          if (match) {
+            const pct = Math.min(95, Math.round((parseInt(match[1]) / 1000000 / totalDuration) * 100));
+            sendProgress(pct);
+          }
+        }
+      });
+      ff.on('close', code => {
+        if (code === 0) resolve();
+        else reject(new Error(tail(stderr)));
+      });
+      ff.on('error', reject);
+    });
+
+    sendProgress(100);
+    const stat = fs.statSync(outputPath);
+    log('FLIP done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
+    const dlId = path.basename(outputPath);
+    pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => fs.unlink(outputPath, () => {}) });
+    res.write(`data: ${JSON.stringify({ type: 'complete', downloadUrl: `/api/download/${dlId}`, filename: outName })}\n\n`);
+    res.end();
+  } catch (err) {
+    log('FLIP failed', err.message);
+    if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
+    res.write(`data: ${JSON.stringify({ type: 'error', error: 'Flip failed', details: err.message })}\n\n`);
+    res.end();
+  }
+});
+
+// Image padder: decode first frame to raw RGB, find the most common color on the
+// 1px perimeter — that's the fill color for padding
+function sampleImageEdge(filePath) {
+  const pr = spawnSync('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height', '-of', 'csv=p=0', filePath], { encoding: 'utf8', timeout: 10000 });
+  const [w, h] = ((pr.stdout || '').trim().split('\n')[0] || '').split(',').map(Number);
+  if (!w || !h) return null;
+  const ff = spawnSync('ffmpeg', ['-hide_banner', '-v', 'quiet', '-i', filePath,
+    '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
+    { maxBuffer: 512 * 1024 * 1024, timeout: 30000 });
+  const buf = ff.stdout;
+  if (!buf || buf.length < w * h * 3) return null;
+  const counts = new Map();
+  const add = (x, y) => {
+    const i = (y * w + x) * 3;
+    const c = (buf[i] << 16) | (buf[i + 1] << 8) | buf[i + 2];
+    counts.set(c, (counts.get(c) || 0) + 1);
+  };
+  for (let x = 0; x < w; x++) { add(x, 0); add(x, h - 1); }
+  for (let y = 0; y < h; y++) { add(0, y); add(w - 1, y); }
+  let bestCount = 0, bestColor = 0xffffff;
+  for (const [c, n] of counts) if (n > bestCount) { bestCount = n; bestColor = c; }
+  return {
+    width: w,
+    height: h,
+    color: '#' + bestColor.toString(16).padStart(6, '0'),
+    edgeCoverage: bestCount / (2 * w + 2 * h)
+  };
+}
+
+// Probe an image: dims, size, sampled edge color
+app.post('/api/pad-info', (req, res) => {
+  const filePath = req.body.filePath;
+  if (!filePath || !fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+  log('PAD-INFO', filePath);
+  const info = sampleImageEdge(filePath);
+  if (!info) return res.status(500).json({ error: 'Could not decode image' });
+  const stat = fs.statSync(filePath);
+  log('PAD-INFO', `${info.width}x${info.height}`, 'edge', info.color,
+    `(${Math.round(info.edgeCoverage * 100)}% of perimeter)`);
+  res.json({ ...info, size: stat.size, filename: path.basename(filePath) });
+});
+
+// Pad endpoint: fields filePath, pct (100-500), color (#rrggbb), filename
+app.post('/api/pad', upload.none(), (req, res) => {
+  const filePath = req.body.filePath;
+  if (!filePath || !fs.existsSync(filePath)) return res.status(400).json({ error: 'File not found' });
+
+  const pct = Math.min(500, Math.max(100, parseFloat(req.body.pct) || 100));
+  let color = String(req.body.color || '').trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
+    const sampled = sampleImageEdge(filePath);
+    color = sampled ? sampled.color : '#ffffff';
+  }
+
+  const ext = path.extname(filePath).toLowerCase().replace('.', '');
+  const outExt = ext === 'jpeg' ? 'jpg' : (ext || 'png');
+  const clientFilename = (req.body.filename || 'padded').replace(/[^A-Za-z0-9_.-]/g, '_');
+  const outName = clientFilename.toLowerCase().endsWith('.' + outExt) ? clientFilename : `${clientFilename}.${outExt}`;
+  const outputPath = path.join(TMP_DIR, `pad_${Date.now()}.${outExt}`);
+
+  const factor = pct / 100;
+  const forceSquare = req.body.forceSquare === '1';
+  const pr = spawnSync('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height', '-of', 'csv=p=0', filePath], { encoding: 'utf8', timeout: 10000 });
+  const [srcW, srcH] = ((pr.stdout || '').trim().split('\n')[0] || '').split(',').map(Number);
+  if (!srcW || !srcH) return res.status(500).json({ error: 'Could not probe image dimensions' });
+  let outW = Math.ceil(srcW * factor);
+  let outH = Math.ceil(srcH * factor);
+  if (forceSquare) outW = outH = Math.max(outW, outH);
+  const padExpr = `pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=${color.replace('#', '0x')}`;
+
+  let args;
+  if (outExt === 'gif') {
+    // Re-generate the palette so the fill color stays exact across all frames
+    args = ['-hide_banner', '-i', filePath,
+      '-filter_complex', `${padExpr},split[s0][s1];[s0]palettegen=reserve_transparent=0[p];[s1][p]paletteuse`,
+      '-y', outputPath];
+  } else {
+    args = ['-hide_banner', '-i', filePath, '-vf', padExpr, '-frames:v', '1', '-update', '1'];
+    if (outExt === 'jpg') args.push('-q:v', '2');
+    args.push('-y', outputPath);
+  }
+
+  log('PAD start', { file: path.basename(filePath), pct, color, forceSquare, out: `${outW}x${outH}`, outName });
+  log('PAD ffmpeg:', args.join(' '));
+
+  const ff = spawn('ffmpeg', args);
+  let stderr = '';
+  ff.stderr.on('data', d => { stderr += d.toString(); });
+  ff.on('close', code => {
+    if (code === 0 && fs.existsSync(outputPath)) {
+      const stat = fs.statSync(outputPath);
+      log('PAD done,', (stat.size / 1024).toFixed(0) + 'KB');
+      const dlId = path.basename(outputPath);
+      pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => fs.unlink(outputPath, () => {}) });
+      res.json({ downloadUrl: `/api/download/${dlId}`, filename: outName });
+    } else {
+      log('PAD failed code=' + code, tail(stderr));
+      if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
+      res.status(500).json({ error: 'Pad failed', details: tail(stderr) });
+    }
+  });
+  ff.on('error', err => {
+    log('ERROR failed to start ffmpeg pad', err.message);
+    res.status(500).json({ error: 'Failed to start ffmpeg', details: err.message });
+  });
+});
+
 // Butt-joiner endpoint: joins multiple local file paths together in order
 app.post('/api/join', async (req, res) => {
   let filePaths;
@@ -673,8 +947,9 @@ app.post('/api/join', async (req, res) => {
   const outName = clientFilename.endsWith('.mp4') ? clientFilename : `${clientFilename}.mp4`;
   const outputPath = path.join(TMP_DIR, `join_${Date.now()}.mp4`);
   const listPath = path.join(TMP_DIR, `join_list_${Date.now()}.txt`);
+  const wantFaststart = req.body.faststart === '1';
 
-  log('JOIN start', { files: filePaths.map(p => path.basename(p)), outName });
+  log('JOIN start', { files: filePaths.map(p => path.basename(p)), outName, faststart: wantFaststart });
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -683,9 +958,47 @@ app.post('/api/join', async (req, res) => {
 
   const sendProgress = (pct) => res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
 
+  const cleanedTemp = [];
   try {
+    // Pre-clean clips whose edit lists hide packets (e.g. QuickTime trims keep
+    // pre-roll/trailing frames flagged discard). The concat demuxer ignores edit
+    // lists, so those hidden frames flash at the joins — re-encode such clips
+    // first, which drops them.
+    const hasHiddenPackets = (p) => {
+      const ff = spawnSync('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0',
+        '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0', p], { encoding: 'utf8' });
+      return (ff.stdout || '').trim().split('\n').some(line => {
+        const [pts, flags] = line.split(',');
+        return (flags || '').includes('D') || parseFloat(pts) < 0;
+      });
+    };
+    const srcPaths = [];
+    for (let i = 0; i < filePaths.length; i++) {
+      const p = filePaths[i];
+      if (!hasHiddenPackets(p)) { srcPaths.push(p); continue; }
+      const cleanPath = path.join(TMP_DIR, `join_clean_${Date.now()}_${i}.mp4`);
+      log(`JOIN ${path.basename(p)} has hidden edit-list packets — re-encoding clean copy`);
+      await new Promise((resolve, reject) => {
+        const ff = spawn('ffmpeg', ['-hide_banner', '-i', p,
+          '-vf', `fps=${probeFps(p)}`,
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+          '-c:a', 'aac', '-b:a', '192k', '-y', cleanPath]);
+        let stderr = '';
+        const cleanStderr = makeStderrLogger(`JOIN clean${i + 1}`);
+        ff.stderr.on('data', d => { stderr += d.toString(); cleanStderr(d); });
+        ff.on('close', code => {
+          if (code === 0) resolve();
+          else reject(new Error(`Clean re-encode failed: ${tail(stderr)}`));
+        });
+        ff.on('error', reject);
+      });
+      cleanedTemp.push(cleanPath);
+      srcPaths.push(cleanPath);
+      sendProgress(Math.round(((i + 1) / filePaths.length) * 40));
+    }
+
     // Probe fps of each file
-    const fpsValues = filePaths.map(p => {
+    const fpsValues = srcPaths.map(p => {
       const ff = spawnSync('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0',
         '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', p], { encoding: 'utf8' });
       const raw = (ff.stdout || '').trim(); // e.g. "30000/1001" or "30/1"
@@ -697,18 +1010,53 @@ app.post('/api/join', async (req, res) => {
     log('JOIN fps values:', fpsValues.map(f => f ? f.toFixed(3) : 'unknown').join(', '),
         allMatch ? '→ stream copy' : '→ re-encode to 30fps');
 
-    fs.writeFileSync(listPath, filePaths.map(p => `file '${p}'`).join('\n'));
+    // Drop the last 2 frames of every clip except the final one — kills flash
+    // frames at the joins. concat's outpoint filters on DTS, and B-frame reorder
+    // shifts DTS earlier than PTS, so probe the tail packets and cut at the min
+    // DTS of the 2 highest-PTS frames.
+    const tailOutpoint = (p) => {
+      const dur = spawnSync('ffprobe', ['-v', 'quiet', '-show_entries', 'format=duration',
+        '-of', 'csv=p=0', p], { encoding: 'utf8' });
+      const d = parseFloat((dur.stdout || '').trim());
+      if (!Number.isFinite(d)) return null;
+      const tailStart = Math.max(0, d - 1);
+      const pk = spawnSync('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0',
+        '-show_entries', 'packet=pts_time,dts_time', '-of', 'csv=p=0',
+        '-read_intervals', `${tailStart}%`, p], { encoding: 'utf8' });
+      const packets = (pk.stdout || '').trim().split('\n')
+        .map(line => line.split(',').map(Number))
+        .filter(([pts, dts]) => Number.isFinite(pts) && Number.isFinite(dts));
+      if (packets.length < 3) return null;
+      packets.sort((a, b) => a[0] - b[0]);
+      const last2 = packets.slice(-2);
+      const cut = Math.min(last2[0][1], last2[1][1]);
+      return cut > 0 ? cut : null;
+    };
+    const listLines = srcPaths.map((p, i) => {
+      if (i === srcPaths.length - 1) return `file '${p}'`;
+      const cut = tailOutpoint(p);
+      if (cut === null) {
+        log(`JOIN could not probe tail of ${path.basename(p)} — joining untrimmed`);
+        return `file '${p}'`;
+      }
+      log(`JOIN trimming last 2 frames of ${path.basename(p)}: outpoint=${cut.toFixed(6)}`);
+      return `file '${p}'\noutpoint ${cut.toFixed(6)}`;
+    });
+
+    fs.writeFileSync(listPath, listLines.join('\n'));
     sendProgress(10);
 
     const encodeArgs = allMatch
       ? ['-c', 'copy']
       : ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-r', '30', '-c:a', 'aac', '-b:a', '192k'];
 
+    const rawOutputPath = outputPath + '.tmp.mp4';
+    const concatDest = wantFaststart ? rawOutputPath : outputPath;
     const args = [
       '-hide_banner', '-f', 'concat', '-safe', '0',
       '-i', listPath,
-      ...encodeArgs, '-movflags', '+faststart',
-      '-y', outputPath
+      ...encodeArgs,
+      '-y', concatDest
     ];
 
     log('JOIN ffmpeg:', args.join(' '));
@@ -725,8 +1073,31 @@ app.post('/api/join', async (req, res) => {
       ff.on('error', reject);
     });
 
-    sendProgress(100);
     fs.unlink(listPath, () => {});
+    cleanedTemp.forEach(p => fs.unlink(p, () => {}));
+    cleanedTemp.length = 0;
+
+    if (wantFaststart) {
+      sendProgress(80);
+
+      const fastArgs = ['-hide_banner', '-i', rawOutputPath, '-c', 'copy', '-movflags', '+faststart', '-y', outputPath];
+      log('JOIN faststart pass:', fastArgs.join(' '));
+
+      await new Promise((resolve, reject) => {
+        const ff = spawn('ffmpeg', fastArgs);
+        let stderr = '';
+        const fsStderr = makeStderrLogger('JOIN faststart');
+        ff.stderr.on('data', d => { stderr += d.toString(); fsStderr(d); });
+        ff.on('close', code => {
+          fs.unlink(rawOutputPath, () => {});
+          if (code === 0) resolve();
+          else reject(new Error(`Faststart failed: ${tail(stderr)}`));
+        });
+        ff.on('error', reject);
+      });
+    }
+
+    sendProgress(100);
     const stat = fs.statSync(outputPath);
     log('JOIN done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
     const dlId = path.basename(outputPath);
@@ -736,7 +1107,10 @@ app.post('/api/join', async (req, res) => {
   } catch (err) {
     log('JOIN failed', err.message);
     fs.unlink(listPath, () => {});
+    cleanedTemp.forEach(p => fs.unlink(p, () => {}));
     if (fs.existsSync(outputPath)) fs.unlink(outputPath, () => {});
+    const rawPath = outputPath + '.tmp.mp4';
+    if (fs.existsSync(rawPath)) fs.unlink(rawPath, () => {});
     res.write(`data: ${JSON.stringify({ type: 'error', error: 'Join failed', details: err.message })}\n\n`);
     res.end();
   }
@@ -783,37 +1157,44 @@ app.post('/api/speedup', upload.single('video'), async (req, res) => {
 
     // Extract frames in parallel batches
     const batchSize = 16;
-    let extracted = 0;
+    let extracted = 0, failed = 0, processed = 0;
     for (let i = 0; i < totalFrames; i += batchSize) {
       const batch = [];
       for (let j = i; j < Math.min(i + batchSize, totalFrames); j++) {
-        const ts = j * interval;
+        // Clamp seek just inside EOF so the final frames still decode
+        const ts = Math.min(j * interval, Math.max(0, duration - 0.05));
         const framePath = path.join(framesDir, `frame_${String(j).padStart(6, '0')}.jpg`);
-        batch.push(new Promise((resolve, reject) => {
+        batch.push(new Promise((resolve) => {
           const ff = spawn('ffmpeg', [
             '-hide_banner', '-ss', String(ts), '-i', speedSrcPath,
             '-frames:v', '1', '-q:v', '2', '-y', framePath
           ]);
-          ff.on('close', code => {
-            if (code === 0) resolve();
-            else reject(new Error(`Frame ${j} failed`));
-          });
-          ff.on('error', reject);
+          // Tolerate undecodable frames (e.g. at/near EOF) — skip rather than fail the whole render
+          ff.on('close', code => { if (code === 0 && fs.existsSync(framePath)) extracted++; else failed++; resolve(); });
+          ff.on('error', () => { failed++; resolve(); });
         }));
       }
       await Promise.all(batch);
-      extracted += batch.length;
-      const pct = Math.min(90, Math.round((extracted / totalFrames) * 90));
-      log(`SPEEDUP extracting frames: ${extracted}/${totalFrames} (${pct}%)`);
+      processed += batch.length;
+      const pct = Math.min(90, Math.round((processed / totalFrames) * 90));
+      log(`SPEEDUP extracting frames: ${processed}/${totalFrames} (${pct}%)`);
       sendProgress(pct);
     }
 
+    if (failed > 0) log(`SPEEDUP skipped ${failed} undecodable frame(s)`);
+    if (extracted === 0) {
+      fs.rm(framesDir, { recursive: true, force: true }, () => {});
+      log('SPEEDUP no frames extracted');
+      res.write(`data: ${JSON.stringify({ type: 'error', error: 'No frames could be extracted' })}\n\n`);
+      speedCleanup();
+      return res.end();
+    }
     log('SPEEDUP extracted', extracted, 'frames, now encoding to video...');
 
-    // Stitch frames into video at 30fps
+    // Stitch frames into video at 30fps. Glob so skipped frames don't break the sequence.
     const stitchArgs = [
       '-hide_banner', '-framerate', '30',
-      '-i', path.join(framesDir, 'frame_%06d.jpg'),
+      '-pattern_type', 'glob', '-i', path.join(framesDir, 'frame_*.jpg'),
       '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
       '-movflags', '+faststart', '-an', '-y', outputPath
     ];
@@ -844,9 +1225,11 @@ app.post('/api/speedup', upload.single('video'), async (req, res) => {
     });
 
   } else {
-    // NORMAL PATH: For low speed factors (<4x), use setpts filter
+    // NORMAL PATH: For low speed factors (<4x), use setpts filter.
+    // Always force CFR: without an fps filter, VFR source timestamps pass
+    // through and QuickTime plays stretches in slow motion.
     let videoFilter = `setpts=${1/speedFactor}*PTS`;
-    if (lockFps) videoFilter += `,fps=30`;
+    videoFilter += lockFps ? ',fps=30' : `,fps=${probeFps(speedSrcPath)}`;
 
     let audioFilter = '';
     let tempFactor = speedFactor;
@@ -1006,13 +1389,28 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
     });
   };
 
+  const hasAudioStream = (filePath) => {
+    const pr = spawnSync('ffprobe', ['-v', 'quiet', '-select_streams', 'a',
+      '-show_entries', 'stream=index', '-of', 'csv=p=0', filePath], { encoding: 'utf8' });
+    return (pr.stdout || '').trim().length > 0;
+  };
+
   const processPane = async (files, factors, name) => {
     const spedUpClips = [];
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const factor = factors[i];
       const clipPath = path.join(TMP_DIR, `${name}_clip_${i}_${Date.now()}.mp4`);
-      
+
+      // Build atempo audio filter chain for this factor
+      let audioFilter = '';
+      let tempFactor = factor;
+      while (tempFactor > 2.0) { audioFilter += (audioFilter ? ',' : '') + 'atempo=2.0'; tempFactor /= 2.0; }
+      while (tempFactor < 0.5) { audioFilter += (audioFilter ? ',' : '') + 'atempo=0.5'; tempFactor /= 0.5; }
+      if (tempFactor !== 1.0) audioFilter += (audioFilter ? ',' : '') + `atempo=${tempFactor}`;
+
+      const srcHasAudio = hasAudioStream(file.path);
+
       if (factor >= 4) {
         // FAST PATH: seek to each timestamp and extract one frame, then stitch
         const fileDuration = await new Promise((resolve) => {
@@ -1026,46 +1424,65 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
         sendLog(`${name}[${i}]: extracting ${totalFrames} frames (seek method, 1 every ${interval.toFixed(1)}s)`);
 
         const batchSize = 16;
+        let extracted = 0, failed = 0, processed = 0;
+        const startMs = Date.now();
         for (let fi = 0; fi < totalFrames; fi += batchSize) {
           const batch = [];
           for (let fj = fi; fj < Math.min(fi + batchSize, totalFrames); fj++) {
-            const ts = fj * interval;
+            // Clamp seek just inside EOF so the final frames still decode
+            const ts = Math.min(fj * interval, Math.max(0, fileDuration - 0.05));
             const framePath = path.join(framesDir, `frame_${String(fj).padStart(6, '0')}.jpg`);
-            batch.push(new Promise((resolve, reject) => {
+            batch.push(new Promise((resolve) => {
               const ff = spawn('ffmpeg', [
                 '-hide_banner', '-ss', String(ts), '-i', file.path,
                 '-frames:v', '1', '-q:v', '2', '-y', framePath
               ]);
-              ff.on('close', code => code === 0 ? resolve() : reject(new Error(`Frame ${fj} failed`)));
-              ff.on('error', reject);
+              // Tolerate a frame that can't be decoded (e.g. at/near EOF) — skip it rather than failing the whole render
+              ff.on('close', code => { if (code === 0 && fs.existsSync(framePath)) extracted++; else failed++; resolve(); });
+              ff.on('error', () => { failed++; resolve(); });
             }));
           }
           await Promise.all(batch);
+          processed += batch.length;
+          const elapsed = (Date.now() - startMs) / 1000;
+          const rate = elapsed > 0 ? (processed / elapsed).toFixed(1) : '0.0';
+          const pct = Math.round((processed / totalFrames) * 100);
+          const progressLine = `TIMELAPSE ${name}[${i}]: frame=${processed}/${totalFrames} (${pct}%) ${rate} fps`;
+          log(progressLine);   // -> stdout + global log panel
+          sendLog(progressLine);  // -> timelapse tool's in-page progress
         }
+        if (failed > 0) sendLog(`${name}[${i}]: skipped ${failed} undecodable frame(s), kept ${extracted}`);
+        if (extracted === 0) throw new Error(`${name}[${i}]: no frames could be extracted`);
 
-        // Stitch frames into clip
-        await runFfmpeg([
+        // Stitch frames into clip, carrying audio (sped with atempo) when the source has it.
+        // Glob the files so gaps (skipped frames) don't break the sequence.
+        const stitchArgs = [
           '-hide_banner', '-framerate', '30',
-          '-i', path.join(framesDir, 'frame_%06d.jpg'),
-          '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p',
-          '-an', '-y', clipPath
-        ], 0, 0);
+          '-pattern_type', 'glob', '-i', path.join(framesDir, 'frame_*.jpg'),
+          '-i', file.path,
+          '-map', '0:v:0',
+        ];
+        if (srcHasAudio) {
+          if (audioFilter) {
+            stitchArgs.push('-filter_complex', `[1:a]${audioFilter}[a]`, '-map', '[a]', '-c:a', 'aac', '-b:a', '192k');
+          } else {
+            stitchArgs.push('-map', '1:a?', '-c:a', 'copy');
+          }
+        }
+        stitchArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-y', clipPath);
+        await runFfmpeg(stitchArgs, 0, 0);
 
         fs.rm(framesDir, { recursive: true, force: true }, () => {});
       } else {
         // NORMAL PATH: setpts filter for low speed factors
-        let audioFilter = '';
-        let tempFactor = factor;
-        while (tempFactor > 2.0) { audioFilter += (audioFilter ? ',' : '') + 'atempo=2.0'; tempFactor /= 2.0; }
-        while (tempFactor < 0.5) { audioFilter += (audioFilter ? ',' : '') + 'atempo=0.5'; tempFactor /= 0.5; }
-        if (tempFactor !== 1.0) audioFilter += (audioFilter ? ',' : '') + `atempo=${tempFactor}`;
-
         const ffArgs = [
           '-hide_banner', '-i', file.path,
           '-vf', `setpts=1/${factor}*PTS,fps=30`,
         ];
-        if (!audioFilter) ffArgs.push('-an');
-        else ffArgs.push('-af', audioFilter);
+        if (srcHasAudio) {
+          if (audioFilter) ffArgs.push('-af', audioFilter, '-c:a', 'aac', '-b:a', '192k');
+          else ffArgs.push('-c:a', 'copy');
+        }
         ffArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-y', clipPath);
         await runFfmpeg(ffArgs, 0, 0);
       }
@@ -1107,6 +1524,13 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
     const fullHeight = doubleRes ? 2160 : 1080;
     const reelsHalfHeight = doubleRes ? 1920 : 960;
 
+    // Keep audio in the outputs: use whichever pane has an audio stream
+    // (top preferred, else bottom). If neither has audio, no audio map.
+    const topHasAudio = hasAudioStream(topPanePath);
+    const bottomHasAudio = hasAudioStream(bottomPanePath);
+    const audioMap = topHasAudio ? ['-map', '0:a?'] : (bottomHasAudio ? ['-map', '1:a?'] : []);
+    const audioCodec = audioMap.length ? ['-c:a', 'aac', '-b:a', '192k'] : [];
+
     // 1. LinkedIn (Square)
     log('TIMELAPSE rendering square (LinkedIn) output...');
     const liPath = path.join(TMP_DIR, `li_${Date.now()}.mp4`);
@@ -1127,8 +1551,10 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
       '-hide_banner', '-progress', 'pipe:2',
       '-i', topPanePath, '-i', bottomPanePath,
       '-filter_complex', liFilter,
+      ...audioMap,
       '-r', '30', '-c:v', 'libx264', '-crf', '10', '-preset', 'fast', '-pix_fmt', 'yuv420p',
       '-maxrate', '5M', '-bufsize', '10M',
+      ...audioCodec,
       '-movflags', '+faststart', '-y', liPath
     ], 40, 0.3);
     
@@ -1157,8 +1583,10 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
       '-hide_banner', '-progress', 'pipe:2',
       '-i', topPanePath, '-i', bottomPanePath,
       '-filter_complex', reelsFilter,
+      ...audioMap,
       '-r', '30', '-c:v', 'libx264', '-crf', '10', '-preset', 'fast', '-pix_fmt', 'yuv420p',
-      '-an', '-movflags', '+faststart', '-y', reelsPath
+      ...audioCodec,
+      '-movflags', '+faststart', '-y', reelsPath
     ], 70, 0.3);
 
     sendProgress(100);

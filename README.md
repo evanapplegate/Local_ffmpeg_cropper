@@ -39,7 +39,7 @@ Then open **http://localhost:3000** in your browser.
 Browse an MP4 or MOV, drag the crop box, choose an aspect ratio (Free / 1:1 / 9:16 / 16:9), and export.
 
 ### Video-Audio Combiner
-Browse a video file and a separate audio file (MOV, MP4, MP3, WAV). Drag the blocks on the timeline to sync them up, select an output range, and export a merged MP4.
+Browse a video file and a separate audio file (MOV, MP4, MP3, WAV, M4A). Drag the blocks on the timeline to sync them up, select an output range, and export a merged MP4.
 
 ### Video Clip Concatenator
 Browse a video, then drag on the timeline to mark one or more segments. Export them joined together in order.

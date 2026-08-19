@@ -449,7 +449,7 @@
   });
 
   document.getElementById('combinerAudioBrowseBtn').addEventListener('click', async () => {
-    const paths = await browseFiles('mov,mp4,mp3,wav');
+    const paths = await browseFiles('mov,mp4,mp3,wav,m4a');
     if (!paths.length) return;
     try {
       const info = await probeLocalPath(paths[0]);
@@ -1005,6 +1005,24 @@
     return `${sign}${mins}:${secs.toString().padStart(2, '0')}`;
   }
 
+  // Parse a timecode string ("2:45", "2:45.5", "1:02:03", or plain "165") into seconds. Returns null if invalid.
+  function parseTime(str) {
+    str = String(str).trim();
+    if (!str) return null;
+    const neg = str.startsWith('-');
+    if (neg) str = str.slice(1);
+    let total;
+    if (str.includes(':')) {
+      const parts = str.split(':').map(p => Number(p));
+      if (parts.some(p => isNaN(p))) return null;
+      total = parts.reduce((acc, p) => acc * 60 + p, 0);
+    } else {
+      total = Number(str);
+      if (isNaN(total)) return null;
+    }
+    return neg ? -total : total;
+  }
+
   function cleanupPreview() {
     if (previewAudioEl) {
       previewAudioEl.pause();
@@ -1051,6 +1069,7 @@
     form.append('audioOffset', String(combinerTimeline.audioOffset));
     form.append('startTime', String(selection.start));
     form.append('endTime', String(selection.end));
+    form.append('videoSpeed', String(parseFloat(document.getElementById('combineVideoSpeed').value) || 1));
     form.append('filename', sanitizeFilename('combined.mp4'));
 
     combineExportBtn.disabled = true;
@@ -1258,16 +1277,23 @@
     }
 
     _renderSelections() {
-      this.selectionsContainer.innerHTML = '';
+      // Remove old selection elements from trackContent
+      this.trackContent.querySelectorAll('.concat-selection').forEach(el => el.remove());
       selectionListEl.innerHTML = '';
 
       this.selections.forEach((sel, idx) => {
-        // Timeline visual
+        // Timeline visual — inside trackContent so coordinates match exactly
         const el = document.createElement('div');
         el.className = 'concat-selection';
-        el.style.left = (sel.start * this.pixelsPerSecond) + 'px';
-        el.style.width = ((sel.end - sel.start) * this.pixelsPerSecond) + 'px';
-        
+        el.style.left = this._timeToPx(sel.start) + 'px';
+        el.style.width = this._timeToPx(sel.end - sel.start) + 'px';
+
+        // Number label on timeline selection
+        const numLabel = document.createElement('span');
+        numLabel.className = 'concat-selection-num';
+        numLabel.textContent = idx + 1;
+        el.appendChild(numLabel);
+
         const removeBtn = document.createElement('button');
         removeBtn.className = 'remove-btn';
         removeBtn.textContent = '×';
@@ -1276,27 +1302,152 @@
           this.removeSelection(idx);
         };
         el.appendChild(removeBtn);
-        
+
         el.onclick = () => {
           this.previewVideo.currentTime = sel.start;
           this.previewVideo.play().catch(() => {});
         };
-        
-        this.selectionsContainer.appendChild(el);
 
-        // Chip list
+        this.trackContent.appendChild(el);
+
+        // Chip list — draggable via pointer events
         const chip = document.createElement('div');
         chip.className = 'selection-chip';
-        chip.innerHTML = `<span>${idx + 1}. ${formatTime(sel.start)} - ${formatTime(sel.end)}</span>`;
+        chip.dataset.idx = idx;
+
+        const dur = sel.end - sel.start;
+        chip.innerHTML = `<span class="chip-grip">⠿</span><span class="chip-idx">${idx + 1}.</span>`;
+
+        // Editable start/end timecodes
+        const startInput = document.createElement('input');
+        startInput.className = 'chip-time';
+        startInput.type = 'text';
+        startInput.value = formatTime(sel.start);
+        const dash = document.createElement('span');
+        dash.textContent = '–';
+        const endInput = document.createElement('input');
+        endInput.className = 'chip-time';
+        endInput.type = 'text';
+        endInput.value = formatTime(sel.end);
+
+        const commit = (input, field) => {
+          const t = parseTime(input.value);
+          if (t === null) { input.value = formatTime(field === 'start' ? sel.start : sel.end); return; }
+          this.editSelectionTime(idx, field, t);
+        };
+        [[startInput, 'start'], [endInput, 'end']].forEach(([input, field]) => {
+          // Don't let clicks/drags inside the input start a chip reorder
+          input.addEventListener('mousedown', e => e.stopPropagation());
+          input.addEventListener('change', () => commit(input, field));
+          input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+        });
+
+        chip.appendChild(startInput);
+        chip.appendChild(dash);
+        chip.appendChild(endInput);
+
+        const durLabel = document.createElement('span');
+        durLabel.className = 'chip-dur';
+        durLabel.textContent = formatTime(dur);
+        chip.appendChild(durLabel);
+
         const chipRemove = document.createElement('button');
         chipRemove.className = 'chip-remove';
         chipRemove.textContent = '×';
         chipRemove.onclick = () => this.removeSelection(idx);
         chip.appendChild(chipRemove);
+
+        // Pointer-based drag reorder
+        chip.style.touchAction = 'none';
+        chip.addEventListener('mousedown', (e) => {
+          if (e.target.closest('.chip-remove')) return;
+          if (e.button !== 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          this._startChipDrag(chip, idx, e);
+        });
+
         selectionListEl.appendChild(chip);
       });
 
+      // Timecode summary below chips
+      this._renderTimecodeBar();
       concatExportBtn.disabled = this.selections.length === 0;
+    }
+
+    _renderTimecodeBar() {
+      let bar = document.getElementById('concatTimecodeBar');
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'concatTimecodeBar';
+        bar.className = 'concat-timecode-bar';
+        selectionListEl.parentNode.insertBefore(bar, selectionListEl.nextSibling);
+      }
+      if (this.selections.length === 0) {
+        bar.textContent = '';
+        return;
+      }
+      const totalDur = this.selections.reduce((sum, s) => sum + (s.end - s.start), 0);
+      const parts = this.selections.map((s, i) => `${formatTime(s.end - s.start)}`);
+      bar.innerHTML = `<span class="timecode-segments">${parts.join(' + ')}</span> = <strong>${formatTime(totalDur)}</strong> total`;
+    }
+
+    _startChipDrag(chip, fromIdx, startEvent) {
+      const chips = [...selectionListEl.querySelectorAll('.selection-chip')];
+      const startX = startEvent.clientX;
+      const startY = startEvent.clientY;
+      let dragging = false;
+      let ghost = null;
+      let currentOver = null;
+
+      const onMove = (e) => {
+        e.preventDefault();
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        if (!dragging && Math.abs(dx) + Math.abs(dy) > 5) {
+          dragging = true;
+          ghost = chip.cloneNode(true);
+          ghost.className = 'selection-chip chip-ghost';
+          const rect = chip.getBoundingClientRect();
+          ghost.style.width = rect.width + 'px';
+          document.body.appendChild(ghost);
+          chip.classList.add('dragging');
+        }
+        if (dragging && ghost) {
+          ghost.style.left = (e.clientX - ghost.offsetWidth / 2) + 'px';
+          ghost.style.top = (e.clientY - ghost.offsetHeight / 2) + 'px';
+
+          // Find which chip we're over
+          chips.forEach(c => c.classList.remove('drag-over'));
+          currentOver = null;
+          for (const c of chips) {
+            if (c === chip) continue;
+            const r = c.getBoundingClientRect();
+            if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+              c.classList.add('drag-over');
+              currentOver = parseInt(c.dataset.idx, 10);
+              break;
+            }
+          }
+        }
+      };
+
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove, true);
+        document.removeEventListener('mouseup', onUp, true);
+        chips.forEach(c => c.classList.remove('drag-over'));
+        chip.classList.remove('dragging');
+        if (ghost) { ghost.remove(); ghost = null; }
+
+        if (dragging && currentOver !== null && currentOver !== fromIdx) {
+          const [moved] = this.selections.splice(fromIdx, 1);
+          this.selections.splice(currentOver, 0, moved);
+          this._renderSelections();
+        }
+      };
+
+      document.addEventListener('mousemove', onMove, true);
+      document.addEventListener('mouseup', onUp, true);
     }
 
     addSelection(start, end) {
@@ -1314,74 +1465,81 @@
       this._renderSelections();
     }
 
+    // Edit a selection's start or end timecode (seconds). Clamps to bounds and keeps a minimum 0.1s gap.
+    editSelectionTime(idx, field, newTime) {
+      const sel = this.selections[idx];
+      if (!sel) return;
+      newTime = Math.max(0, Math.min(this.duration, newTime));
+      if (field === 'start') sel.start = Math.min(newTime, sel.end - 0.1);
+      else sel.end = Math.max(newTime, sel.start + 0.1);
+      this._renderSelections();
+    }
+
+    // Convert clientX to time using trackContent as reference
+    _xToTime(clientX) {
+      const rect = this.trackContent.getBoundingClientRect();
+      const x = clientX - rect.left;
+      return Math.max(0, Math.min(this.duration, x / this.pixelsPerSecond));
+    }
+
+    // Convert time to px offset within trackContent
+    _timeToPx(t) {
+      return t * this.pixelsPerSecond;
+    }
+
     _attach() {
       let dragStart = null;
       let dragStartX = null;
       let tempSelection = null;
       let isDragging = false;
 
+      // Create new selection by dragging on empty track area
       const onDown = (e) => {
         if (e.target.closest('.concat-selection')) return;
         e.preventDefault();
-        
-        const rect = this.trackContent.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const time = Math.max(0, Math.min(this.duration, x / this.pixelsPerSecond));
-        
-        dragStart = time;
+
+        dragStart = this._xToTime(e.clientX);
         dragStartX = e.clientX;
         isDragging = false;
-        
+
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
       };
 
       const onMove = (e) => {
         if (dragStart === null) return;
-        
-        // Check if we've moved enough to start dragging (5px threshold)
+
         if (!isDragging && Math.abs(e.clientX - dragStartX) > 5) {
           isDragging = true;
-          // Create temp selection element now that we're dragging
           tempSelection = document.createElement('div');
           tempSelection.className = 'concat-selection';
-          tempSelection.style.left = (dragStart * this.pixelsPerSecond) + 'px';
-          tempSelection.style.width = '0px';
           tempSelection.style.opacity = '0.7';
-          this.selectionsContainer.appendChild(tempSelection);
+          this.trackContent.appendChild(tempSelection);
         }
-        
+
         if (isDragging && tempSelection) {
-          const rect = this.trackContent.getBoundingClientRect();
-          const x = e.clientX - rect.left;
-          const time = Math.max(0, Math.min(this.duration, x / this.pixelsPerSecond));
-          
+          const time = this._xToTime(e.clientX);
           const left = Math.min(dragStart, time);
           const width = Math.abs(time - dragStart);
-          
-          tempSelection.style.left = (left * this.pixelsPerSecond) + 'px';
-          tempSelection.style.width = (width * this.pixelsPerSecond) + 'px';
+          tempSelection.style.left = this._timeToPx(left) + 'px';
+          tempSelection.style.width = this._timeToPx(width) + 'px';
         }
       };
 
       const onUp = (e) => {
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
-        
+
         if (tempSelection) {
           tempSelection.remove();
           tempSelection = null;
         }
-        
+
         if (dragStart !== null) {
           if (isDragging) {
-            // Was dragging - create selection
-            const rect = this.trackContent.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const time = Math.max(0, Math.min(this.duration, x / this.pixelsPerSecond));
+            const time = this._xToTime(e.clientX);
             this.addSelection(dragStart, time);
           } else {
-            // Was just a click - seek to position
             this.previewVideo.currentTime = dragStart;
             this.updatePlayhead(dragStart);
           }
@@ -1392,6 +1550,56 @@
       };
 
       this.trackContent.addEventListener('mousedown', onDown);
+
+      // Drag existing selections to reposition on timeline
+      this.trackContent.addEventListener('mousedown', (e) => {
+        const selEl = e.target.closest('.concat-selection');
+        if (!selEl || e.target.closest('.remove-btn')) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        const selEls = [...this.trackContent.querySelectorAll('.concat-selection')];
+        const idx = selEls.indexOf(selEl);
+        if (idx < 0) return;
+        const sel = this.selections[idx];
+        const duration = sel.end - sel.start;
+
+        // Where within the selection did the user grab?
+        const grabTime = this._xToTime(e.clientX);
+        const grabOffset = grabTime - sel.start;
+
+        selEl.style.opacity = '0.5';
+        selEl.style.cursor = 'grabbing';
+
+        const onSelMove = (ev) => {
+          const t = this._xToTime(ev.clientX);
+          let newStart = t - grabOffset;
+          // Clamp to timeline bounds
+          newStart = Math.max(0, Math.min(this.duration - duration, newStart));
+          sel.start = newStart;
+          sel.end = newStart + duration;
+          selEl.style.left = this._timeToPx(sel.start) + 'px';
+
+          // Update the matching chip timecode live
+          const chip = selectionListEl.children[idx];
+          if (chip) {
+            const spanEl = chip.querySelector('span:nth-child(2)');
+            if (spanEl) spanEl.textContent = `${idx + 1}. ${formatTime(sel.start)} – ${formatTime(sel.end)}`;
+          }
+          this._renderTimecodeBar();
+        };
+
+        const onSelUp = () => {
+          document.removeEventListener('mousemove', onSelMove, true);
+          document.removeEventListener('mouseup', onSelUp, true);
+          selEl.style.opacity = '';
+          selEl.style.cursor = '';
+          this._renderSelections();
+        };
+
+        document.addEventListener('mousemove', onSelMove, true);
+        document.addEventListener('mouseup', onSelUp, true);
+      });
     }
 
     _attachResize() {
@@ -1456,6 +1664,7 @@
     form.append('filePath', concatLocalPath);
     form.append('selections', JSON.stringify(selections));
     form.append('filename', sanitizeFilename('concatenated.mp4'));
+    form.append('faststart', document.getElementById('concatFaststart').checked ? '1' : '0');
 
     concatExportBtn.disabled = true;
     concatExportBtn.textContent = 'Export 0%';
@@ -1606,6 +1815,7 @@
         const formData = new URLSearchParams();
         formData.set('filePaths', JSON.stringify(joinerClips.map(c => c.path)));
         formData.set('filename', outName);
+        formData.set('faststart', document.getElementById('joinFaststart').checked ? '1' : '0');
 
         const resp = await fetch('/api/join', {
           method: 'POST',
@@ -1658,28 +1868,95 @@
   const speederFileInfo = document.getElementById('speederFileInfo');
   const speederSection = document.getElementById('speederSection');
   const speederPreviewVideo = document.getElementById('speederPreviewVideo');
+  const speederPreviewWrap = speederPreviewVideo.closest('.preview-wrap');
   const speedFactorInput = document.getElementById('speedFactor');
   const lockFpsCheckbox = document.getElementById('lockFps');
   const origDurationEl = document.getElementById('origDuration');
   const newDurationEl = document.getElementById('newDuration');
+  const speedInfoEl = document.getElementById('speedInfo');
   const speederExportBtn = document.getElementById('speederExportBtn');
+  const speederBatchMode = document.getElementById('speederBatchMode');
+  const speederBatchList = document.getElementById('speederBatchList');
 
   let speederLocalPath = null;
   let speederOrigDuration = 0;
+  let speederBatchFiles = []; // [{ path, filename, size, duration }]
+
+  function renderSpeederBatchList() {
+    const factor = parseFloat(speedFactorInput.value) || 1.0;
+    speederBatchList.innerHTML = '';
+    speederBatchFiles.forEach((f, idx) => {
+      const newDur = factor > 0 ? f.duration / factor : f.duration;
+      const li = document.createElement('li');
+      li.className = 'joiner-item';
+      li.innerHTML = `
+        <span class="joiner-item-num">${idx + 1}</span>
+        <span class="joiner-item-name">${f.filename} • ${(f.size/1e6).toFixed(1)} MB</span>
+        <span class="joiner-item-dur">${formatTime(f.duration)} → ${formatTime(newDur)}</span>
+        <div class="joiner-item-btns"><button data-remove="${idx}">✕</button></div>
+      `;
+      speederBatchList.appendChild(li);
+    });
+    speederBatchList.querySelectorAll('button[data-remove]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const i = parseInt(btn.getAttribute('data-remove'), 10);
+        speederBatchFiles.splice(i, 1);
+        renderSpeederBatchList();
+        updateSpeederVisibility();
+      });
+    });
+  }
+
+  function updateSpeederVisibility() {
+    const batch = speederBatchMode.checked;
+    setHidden(speederBatchList, !batch || speederBatchFiles.length === 0);
+    setHidden(speederPreviewWrap, batch);
+    setHidden(speedInfoEl, batch);
+    if (batch) {
+      setHidden(speederFileInfo, true);
+      setHidden(speederSection, speederBatchFiles.length === 0);
+    } else {
+      setHidden(speederFileInfo, !speederLocalPath);
+      setHidden(speederSection, !speederLocalPath);
+    }
+  }
+
+  speederBatchMode.addEventListener('change', () => {
+    if (speederBatchMode.checked) {
+      speederLocalPath = null;
+      speederPreviewVideo.removeAttribute('src');
+      speederPreviewVideo.load();
+    } else {
+      speederBatchFiles = [];
+      renderSpeederBatchList();
+    }
+    updateSpeederVisibility();
+  });
+
   document.getElementById('speederBrowseBtn').addEventListener('click', async () => {
-    const paths = await browseFiles('mov,mp4');
+    const batch = speederBatchMode.checked;
+    const paths = await browseFiles('mov,mp4', batch);
     if (!paths.length) return;
-    const p = paths[0];
     try {
-      const info = await probeLocalPath(p);
-      speederLocalPath = p;
-      speederFileInfo.textContent = `${info.filename} • ${(info.size/1e6).toFixed(1)} MB`;
-      setHidden(speederFileInfo, false);
-      setHidden(speederSection, false);
-      speederPreviewVideo.src = `/api/localfile?path=${encodeURIComponent(p)}`;
-      speederOrigDuration = info.duration;
-      origDurationEl.textContent = formatTime(speederOrigDuration);
-      updateNewDuration();
+      if (batch) {
+        for (const p of paths) {
+          if (speederBatchFiles.find(f => f.path === p)) continue;
+          const info = await probeLocalPath(p);
+          speederBatchFiles.push({ path: p, filename: info.filename, size: info.size, duration: info.duration });
+        }
+        renderSpeederBatchList();
+        updateSpeederVisibility();
+      } else {
+        const p = paths[0];
+        const info = await probeLocalPath(p);
+        speederLocalPath = p;
+        speederFileInfo.textContent = `${info.filename} • ${(info.size/1e6).toFixed(1)} MB`;
+        speederPreviewVideo.src = `/api/localfile?path=${encodeURIComponent(p)}`;
+        speederOrigDuration = info.duration;
+        origDurationEl.textContent = formatTime(speederOrigDuration);
+        updateNewDuration();
+        updateSpeederVisibility();
+      }
     } catch (err) { alert('Path error: ' + err.message); }
   });
 
@@ -1690,81 +1967,126 @@
     newDurationEl.textContent = formatTime(newDur);
   }
 
-  speedFactorInput.addEventListener('input', updateNewDuration);
+  speedFactorInput.addEventListener('input', () => {
+    updateNewDuration();
+    if (speederBatchMode.checked) renderSpeederBatchList();
+  });
 
-  speederExportBtn.addEventListener('click', async () => {
-    if (!speederLocalPath) return;
-    const factor = parseFloat(speedFactorInput.value) || 1.0;
-    const lockFps = lockFpsCheckbox.checked;
-
+  async function runSpeedupJob({ filePath, duration, factor, lockFps, outputFilename, progressLabel }) {
     const form = new FormData();
-    form.append('filePath', speederLocalPath);
+    form.append('filePath', filePath);
     form.append('speedFactor', String(factor));
     form.append('lockFps', String(lockFps));
-    form.append('duration', String(speederOrigDuration));
-    form.append('filename', sanitizeFilename('sped_up.mp4'));
+    form.append('duration', String(duration));
+    form.append('filename', sanitizeFilename(outputFilename));
 
-    speederExportBtn.disabled = true;
-    speederExportBtn.textContent = 'Exporting 0%';
+    const resp = await fetch('/api/speedup', { method: 'POST', body: form });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finished = false;
+    let fatalError = null;
 
     try {
-      const resp = await fetch('/api/speedup', { method: 'POST', body: form });
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
+      while (!finished) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n\n');
         buffer = lines.pop() || '';
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.type === 'progress') {
-              speederExportBtn.textContent = `Exporting ${data.percent}%`;
-            } else if (data.type === 'complete') {
-              if (data.downloadUrl) {
-                const a = document.createElement('a');
-                a.href = data.downloadUrl;
-                a.download = data.filename || 'sped_up.mp4';
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-              } else if (data.data) {
-                const binary = atob(data.data);
-                const bytes = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) {
-                  bytes[i] = binary.charCodeAt(i);
-                }
-                const blob = new Blob([bytes], { type: 'video/mp4' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = data.filename || 'sped_up.mp4';
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                URL.revokeObjectURL(url);
-              }
-            } else if (data.type === 'error') {
-              throw new Error(data.error + (data.details ? ': ' + data.details : ''));
+          let data;
+          try { data = JSON.parse(line.slice(6)); } catch { continue; }
+          if (data.type === 'progress') {
+            speederExportBtn.textContent = `${progressLabel} ${data.percent}%`;
+          } else if (data.type === 'complete') {
+            if (data.downloadUrl) {
+              const a = document.createElement('a');
+              a.href = data.downloadUrl;
+              a.download = data.filename || outputFilename;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+            } else if (data.data) {
+              const binary = atob(data.data);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+              const blob = new Blob([bytes], { type: 'video/mp4' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = data.filename || outputFilename;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(url);
             }
-          } catch (e) {
-            if (e.message && !e.message.includes('JSON')) throw e;
+            finished = true;
+            break;
+          } else if (data.type === 'error') {
+            fatalError = new Error(data.error + (data.details ? ': ' + data.details : ''));
+            finished = true;
+            break;
           }
         }
+      }
+    } finally {
+      try { await reader.cancel(); } catch {}
+    }
+    if (fatalError) throw fatalError;
+  }
+
+  function spedFilenameFor(originalFilename) {
+    const base = originalFilename.replace(/\.[^.]+$/, '');
+    return `${base}_sped.mp4`;
+  }
+
+  speederExportBtn.addEventListener('click', async () => {
+    const batch = speederBatchMode.checked;
+    if (batch && speederBatchFiles.length === 0) return;
+    if (!batch && !speederLocalPath) return;
+
+    const factor = parseFloat(speedFactorInput.value) || 1.0;
+    const lockFps = lockFpsCheckbox.checked;
+
+    speederExportBtn.disabled = true;
+
+    try {
+      if (batch) {
+        for (let i = 0; i < speederBatchFiles.length; i++) {
+          const f = speederBatchFiles[i];
+          const label = `File ${i + 1}/${speederBatchFiles.length}`;
+          speederExportBtn.textContent = `${label} 0%`;
+          await runSpeedupJob({
+            filePath: f.path,
+            duration: f.duration,
+            factor,
+            lockFps,
+            outputFilename: spedFilenameFor(f.filename),
+            progressLabel: label
+          });
+        }
+        speederExportBtn.textContent = `Done — ${speederBatchFiles.length} files`;
+      } else {
+        speederExportBtn.textContent = 'Exporting 0%';
+        await runSpeedupJob({
+          filePath: speederLocalPath,
+          duration: speederOrigDuration,
+          factor,
+          lockFps,
+          outputFilename: 'sped_up.mp4',
+          progressLabel: 'Exporting'
+        });
       }
     } catch (err) {
       console.error('Speeder export error:', err);
       alert(err.message || String(err));
     } finally {
       speederExportBtn.disabled = false;
-      speederExportBtn.textContent = 'Speed Up & Export';
+      setTimeout(() => { speederExportBtn.textContent = 'Speed Up & Export'; }, 1500);
     }
   });
 
@@ -2114,6 +2436,237 @@
       shrinkerExportBtn.disabled = false;
       shrinkerExportBtn.textContent = 'Shrink & Export';
     }
+  });
+})();
+
+// ========== IMAGE PADDER ==========
+(function() {
+  const padderFileInfo = document.getElementById('padderFileInfo');
+  const padderSection = document.getElementById('padderSection');
+  const previewBox = document.getElementById('padderPreviewBox');
+  const previewImg = document.getElementById('padderPreviewImg');
+  const padSlider = document.getElementById('padPct');
+  const padPctLabel = document.getElementById('padPctLabel');
+  const padderInfo = document.getElementById('padderInfo');
+  const padderExportBtn = document.getElementById('padderExportBtn');
+  const padForceSquare = document.getElementById('padForceSquare');
+
+  let padderLocalPath = null;
+  let padderW = 0;
+  let padderH = 0;
+  let padderColor = '#ffffff';
+
+  function setHidden(el, hidden) {
+    if (hidden) el.setAttribute('hidden', '');
+    else el.removeAttribute('hidden');
+  }
+
+  function updatePreview() {
+    const pct = parseInt(padSlider.value, 10);
+    padPctLabel.textContent = pct + '%';
+    if (!padderW) return;
+    let outW = Math.ceil(padderW * pct / 100);
+    let outH = Math.ceil(padderH * pct / 100);
+    if (padForceSquare.checked) outW = outH = Math.max(outW, outH);
+    padderInfo.textContent = `${padderW}x${padderH} → ${outW}x${outH} • edge ${padderColor}`;
+    previewBox.style.background = padderColor;
+    previewBox.style.aspectRatio = `${outW} / ${outH}`;
+    previewImg.style.width = (padderW / outW * 100) + '%';
+  }
+
+  document.getElementById('padderBrowseBtn').addEventListener('click', async () => {
+    const resp = await fetch('/api/browse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accept: 'jpg,jpeg,png,gif', multiple: false })
+    });
+    const data = await resp.json();
+    if (data.canceled || !data.paths || !data.paths.length) return;
+    const p = data.paths[0];
+    try {
+      const infoResp = await fetch('/api/pad-info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: p })
+      });
+      if (!infoResp.ok) throw new Error((await infoResp.json()).error || 'Probe failed');
+      const info = await infoResp.json();
+      padderLocalPath = p;
+      padderW = info.width;
+      padderH = info.height;
+      padderColor = info.color;
+      padderFileInfo.textContent = `${info.filename} • ${(info.size / 1e6).toFixed(1)} MB`;
+      setHidden(padderFileInfo, false);
+      setHidden(padderSection, false);
+      previewImg.src = `/api/localfile?path=${encodeURIComponent(p)}`;
+      updatePreview();
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
+
+  padSlider.addEventListener('input', updatePreview);
+  padForceSquare.addEventListener('change', updatePreview);
+
+  padderExportBtn.addEventListener('click', async () => {
+    if (!padderLocalPath) return;
+
+    const form = new FormData();
+    form.append('filePath', padderLocalPath);
+    form.append('pct', padSlider.value);
+    form.append('color', padderColor);
+    form.append('forceSquare', padForceSquare.checked ? '1' : '0');
+    const baseName = padderLocalPath.split('/').pop().replace(/\.[^.]+$/, '');
+    form.append('filename', `${baseName}_padded`);
+
+    padderExportBtn.disabled = true;
+    padderExportBtn.textContent = 'Padding...';
+
+    try {
+      const resp = await fetch('/api/pad', { method: 'POST', body: form });
+      const d = await resp.json();
+      if (!resp.ok) throw new Error(d.error + (d.details ? ': ' + d.details : ''));
+      const a = document.createElement('a');
+      a.href = d.downloadUrl;
+      a.download = d.filename || 'padded';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      console.error('Padder error:', err);
+      alert(err.message || String(err));
+    } finally {
+      padderExportBtn.disabled = false;
+      padderExportBtn.textContent = 'Pad & Export';
+    }
+  });
+})();
+
+// ========== VIDEO FLIPPER ==========
+(function() {
+  const flipFileInfo = document.getElementById('flipFileInfo');
+  const flipSection = document.getElementById('flipSection');
+  const flipPreviewVideo = document.getElementById('flipPreviewVideo');
+  const flipH = document.getElementById('flipH');
+  const flipV = document.getElementById('flipV');
+  const flipExportBtn = document.getElementById('flipExportBtn');
+
+  let flipLocalPath = null;
+
+  function setHidden(el, hidden) {
+    if (hidden) el.setAttribute('hidden', '');
+    else el.removeAttribute('hidden');
+  }
+
+  function updatePreviewTransform() {
+    const transforms = [];
+    if (flipH.checked) transforms.push('scaleX(-1)');
+    if (flipV.checked) transforms.push('scaleY(-1)');
+    flipPreviewVideo.style.transform = transforms.join(' ');
+  }
+
+  document.getElementById('flipBrowseBtn').addEventListener('click', async () => {
+    const resp = await fetch('/api/browse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accept: 'mov,mp4', multiple: false })
+    });
+    const data = await resp.json();
+    if (data.canceled || !data.paths || !data.paths.length) return;
+    const p = data.paths[0];
+    try {
+      const probeResp = await fetch('/api/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: p })
+      });
+      if (!probeResp.ok) throw new Error('Probe failed');
+      const info = await probeResp.json();
+      flipLocalPath = p;
+      flipFileInfo.textContent = `${info.filename} • ${(info.size / 1e6).toFixed(1)} MB`;
+      setHidden(flipFileInfo, false);
+      setHidden(flipSection, false);
+      flipPreviewVideo.src = `/api/localfile?path=${encodeURIComponent(p)}`;
+      updatePreviewTransform();
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
+
+  flipH.addEventListener('change', updatePreviewTransform);
+  flipV.addEventListener('change', updatePreviewTransform);
+
+  flipExportBtn.addEventListener('click', async () => {
+    if (!flipLocalPath) return;
+    if (!flipH.checked && !flipV.checked) {
+      alert('Select at least one flip direction');
+      return;
+    }
+
+    const form = new FormData();
+    form.append('filePath', flipLocalPath);
+    form.append('hflip', flipH.checked ? '1' : '0');
+    form.append('vflip', flipV.checked ? '1' : '0');
+    const baseName = flipLocalPath.split('/').pop().replace(/\.[^.]+$/, '');
+    form.append('filename', `${baseName}_flipped.mp4`);
+
+    flipExportBtn.disabled = true;
+    flipExportBtn.textContent = 'Flipping 0%';
+
+    try {
+      const resp = await fetch('/api/flip', { method: 'POST', body: form });
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            if (d.type === 'progress') {
+              flipExportBtn.textContent = `Flipping ${d.percent}%`;
+            } else if (d.type === 'complete') {
+              if (d.downloadUrl) {
+                const a = document.createElement('a');
+                a.href = d.downloadUrl;
+                a.download = d.filename || 'flipped.mp4';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              }
+            } else if (d.type === 'error') {
+              throw new Error(d.error + (d.details ? ': ' + d.details : ''));
+            }
+          } catch (e) {
+            if (e.message && !e.message.includes('JSON')) throw e;
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Flipper error:', err);
+      alert(err.message || String(err));
+    } finally {
+      flipExportBtn.disabled = false;
+      flipExportBtn.textContent = 'Flip & Export';
+    }
+  });
+})();
+
+// Kill & restart server
+(function() {
+  const btn = document.getElementById('restartBtn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (!confirm('Kill all processes and restart the server?')) return;
+    btn.disabled = true;
+    btn.textContent = 'Restarting...';
+    try {
+      await fetch('/api/restart', { method: 'POST' });
+    } catch (e) {}
+    setTimeout(() => { location.reload(); }, 2500);
   });
 })();
 
