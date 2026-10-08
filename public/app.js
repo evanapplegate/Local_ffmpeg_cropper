@@ -2653,6 +2653,645 @@
       flipExportBtn.textContent = 'Flip & Export';
     }
   });
+
+})();
+
+// ========== FAST-CUT MUSIC VIDDER ==========
+(function() {
+  const $ = (id) => document.getElementById(id);
+
+  function setHidden(el, hidden) {
+    if (hidden) el.setAttribute('hidden', '');
+    else el.removeAttribute('hidden');
+  }
+
+  async function postJson(url, payload) {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  }
+
+  const addBtn = $('vidderAddBtn');
+  const loadBtn = $('vidderLoadBtn');
+  const saveBtn = $('vidderSaveBtn');
+  const clearBtn = $('vidderClearBtn');
+  const fileInfoEl = $('vidderFileInfo');
+  const section = $('vidderSection');
+  const clipDurInput = $('vidderClipDur');
+  const vertOnly = $('vidderVertOnly');
+  const musicBtn = $('vidderMusicBtn');
+  const musicWrap = $('vidderMusic');
+  const musicNameEl = $('vidderMusicName');
+  const musicRangeEl = $('vidderMusicRange');
+  const musicTrack = $('vidderMusicTrack');
+  const musicBox = $('vidderMusicBox');
+  const waveEl = $('vidderWave');
+  const list = $('vidderList');
+  const vids = [$('vidderPreviewA'), $('vidderPreviewB')];
+  const playBtn = $('vidderPlayBtn');
+  const infoEl = $('vidderInfo');
+  const renderBtn = $('vidderRenderBtn');
+  const progress = $('vidderProgress');
+  const progressFill = $('vidderProgressFill');
+  const progressLabel = $('vidderProgressLabel');
+
+  let clips = [];   // [{path, name, duration, width, height, start, strip}]
+  let tossed = [];  // non-vertical clips set aside by "Vert vids only"
+  let music = null; // {path, name, duration, start, audio}
+  let mode = null;  // null | 'loop' | 'seq'
+  let modeToken = 0;
+  let raf = 0;
+
+  const fileUrl = (p) => `/api/localfile?path=${encodeURIComponent(p)}`;
+  const clipDur = () => Math.max(0.1, parseFloat(clipDurInput.value) || 2);
+  // Server snaps each slice to whole 30fps frames; mirror that so preview timing matches
+  const segDur = () => Math.max(1, Math.round(clipDur() * 30)) / 30;
+  const totalDur = () => segDur() * clips.length;
+  const isVert = (c) => c.height > c.width;
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+  const maxStart = (c) => Math.max(0, c.duration - segDur());
+  const fmtT = (s) => {
+    const ds = Math.round(s * 10);
+    const m = Math.floor(ds / 600);
+    return `${m}:${((ds - m * 600) / 10).toFixed(1).padStart(4, '0')}`;
+  };
+  const fmtDur = (s) => s.toFixed(2).replace(/\.?0+$/, '');
+  const dirOf = (p) => p.replace(/\/[^/]*$/, '');
+  const byName = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+  // Output/order file base name: folder of the first clip
+  const baseName = () => {
+    const first = clips[0] || tossed[0];
+    return (first && dirOf(first.path).split('/').pop()) || 'vidder';
+  };
+
+  function clampAll() {
+    clips.forEach(c => { c.start = clamp(c.start, 0, maxStart(c)); });
+    if (music) music.start = clamp(music.start, 0, music.duration - totalDur());
+  }
+
+  function updateStatus(msg) {
+    const any = clips.length + tossed.length > 0;
+    let text = `${clips.length} clip${clips.length === 1 ? '' : 's'}`;
+    if (tossed.length) text += ` (${tossed.length} non-vertical tossed)`;
+    if (msg) text += ` • ${msg}`;
+    fileInfoEl.textContent = text;
+    setHidden(fileInfoEl, !any);
+    setHidden(section, !any);
+    saveBtn.disabled = !any;
+    clearBtn.disabled = !any && !music;
+  }
+
+  // Non-vertical clips go straight to `tossed` while "Vert vids only" is on
+  function appendClips(newClips) {
+    newClips.forEach(c => (vertOnly.checked && !isVert(c) ? tossed : clips).push(c));
+  }
+
+  function updateInfo() {
+    const n = clips.length;
+    const total = totalDur();
+    let html = `${n} clip${n === 1 ? '' : 's'} × ${fmtDur(segDur())}s = <strong>${fmtT(total)}</strong>`;
+    if (music) {
+      html += `<br>Music ${fmtT(music.start)} – ${fmtT(music.start + Math.min(total, music.duration))}`;
+      if (music.duration < total) {
+        html += `<br><span class="warn">Music is ${(total - music.duration).toFixed(1)}s shorter than the cut</span>`;
+      }
+    } else {
+      html += '<br>No music (renders silent)';
+    }
+    const shorts = clips.filter(c => c.duration < segDur()).length;
+    if (shorts) {
+      html += `<br><span class="warn">${shorts} clip${shorts === 1 ? '' : 's'} shorter than ${fmtDur(segDur())}s (last frame held)</span>`;
+    }
+    infoEl.innerHTML = html;
+    renderBtn.disabled = !n;
+    playBtn.disabled = !n;
+  }
+
+  // ---- Preview ----
+
+  function showSlot(i) {
+    vids.forEach((v, k) => v.classList.toggle('hidden', k !== i));
+  }
+
+  function highlight(clip) {
+    const idx = clip ? clips.indexOf(clip) : -1;
+    [...list.children].forEach((row, i) => row.classList.toggle('playing', i === idx));
+  }
+
+  function stopPreview() {
+    modeToken++;
+    mode = null;
+    cancelAnimationFrame(raf);
+    vids[0]._want = null;
+    vids.forEach(v => v.pause());
+    if (music) music.audio.pause();
+    highlight(null);
+    playBtn.textContent = 'Play Sequence';
+  }
+
+  // Point a preview <video> at a clip time; resolves once that frame is ready
+  // (or once a newer cue on the same element supersedes this one)
+  function cue(v, clip, t) {
+    const id = (v._cueId = (v._cueId || 0) + 1);
+    return new Promise((resolve) => {
+      const finish = () => {
+        v.removeEventListener('seeked', onSeeked);
+        v.removeEventListener('error', finish);
+        resolve();
+      };
+      const onSeeked = () => finish();
+      const seek = () => {
+        if (v._cueId !== id) return finish();
+        v.addEventListener('seeked', onSeeked);
+        v.currentTime = t;
+      };
+      v.addEventListener('error', finish);
+      if (v.dataset.path !== clip.path) {
+        v.dataset.path = clip.path;
+        v.src = fileUrl(clip.path);
+        v.addEventListener('loadedmetadata', seek, { once: true });
+      } else if (v.readyState >= 1) {
+        seek();
+      } else {
+        v.addEventListener('loadedmetadata', seek, { once: true });
+      }
+    });
+  }
+
+  // While dragging a box: show the frame at the box start, coalescing seeks
+  function scrubTo(clip) {
+    const v = vids[0];
+    showSlot(0);
+    v.pause();
+    v._want = clip.start;
+    if (v.dataset.path !== clip.path) cue(v, clip, clip.start);
+    else if (!v.seeking && v.readyState >= 1) v.currentTime = clip.start;
+  }
+  vids[0].addEventListener('seeked', () => {
+    const v = vids[0];
+    if (mode === null && v._want != null && Math.abs(v.currentTime - v._want) > 0.02) v.currentTime = v._want;
+  });
+
+  async function loopClip(clip) {
+    stopPreview();
+    const token = modeToken;
+    mode = 'loop';
+    const v = vids[0];
+    const end = clip.start + segDur();
+    showSlot(0);
+    highlight(clip);
+    await cue(v, clip, clip.start);
+    if (token !== modeToken) return;
+    v.play().catch(() => {});
+    const tick = () => {
+      if (token !== modeToken) return;
+      if (v.currentTime >= end || v.ended) {
+        v.currentTime = clip.start;
+        v.play().catch(() => {});
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+  }
+
+  // Plays every slice in order against the music window. Two <video>s
+  // alternate so the next clip is already seeked while the current one plays.
+  async function playSequence() {
+    stopPreview();
+    if (!clips.length) return;
+    const token = modeToken;
+    mode = 'seq';
+    playBtn.textContent = 'Stop';
+    const D = segDur();
+    const order = clips.slice();
+    await cue(vids[0], order[0], order[0].start);
+    if (token !== modeToken) return;
+    if (music) {
+      music.audio.currentTime = music.start;
+      await music.audio.play().catch(() => {});
+      if (token !== modeToken) return;
+    }
+    const t0 = performance.now();
+    let cur = -1;
+    const tick = () => {
+      if (token !== modeToken) return;
+      const i = Math.floor((performance.now() - t0) / 1000 / D);
+      if (i >= order.length) { stopPreview(); return; }
+      if (i !== cur) {
+        cur = i;
+        const v = vids[i % 2];
+        const other = vids[(i + 1) % 2];
+        showSlot(i % 2);
+        if (v.dataset.path === order[i].path) v.play().catch(() => {});
+        else cue(v, order[i], order[i].start).then(() => { if (token === modeToken) v.play().catch(() => {}); });
+        other.pause();
+        if (i + 1 < order.length) cue(other, order[i + 1], order[i + 1].start);
+        highlight(order[i]);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+  }
+
+  playBtn.addEventListener('click', () => {
+    if (mode === 'seq') stopPreview();
+    else playSequence();
+  });
+
+  // ---- Clip rows ----
+
+  function positionClipBox(row, clip) {
+    const box = row.querySelector('.vidder-box');
+    box.style.left = (clip.start / clip.duration * 100) + '%';
+    box.style.width = (Math.min(1, segDur() / clip.duration) * 100) + '%';
+    row.querySelector('.vidder-time').textContent = fmtT(clip.start);
+  }
+
+  function moveClip(from, to) {
+    if (to < 0 || to >= clips.length || to === from) return;
+    if (mode === 'seq') stopPreview();
+    const [c] = clips.splice(from, 1);
+    clips.splice(to, 0, c);
+    renderList();
+  }
+
+  function startRowDrag(row, fromIdx, startEvent) {
+    const rows = [...list.children];
+    const others = rows.filter(r => r !== row);
+    const startY = startEvent.clientY;
+    let dragging = false;
+    let slot = fromIdx;
+    const clearMarks = () => rows.forEach(r => r.classList.remove('drop-before', 'drop-after'));
+
+    const onMove = (e) => {
+      const dy = e.clientY - startY;
+      if (!dragging && Math.abs(dy) < 4) return;
+      dragging = true;
+      row.classList.add('dragging');
+      row.style.transform = `translateY(${dy}px)`;
+      // Insertion slot among the other rows, by row midpoint
+      slot = others.findIndex(r => {
+        const b = r.getBoundingClientRect();
+        return e.clientY < b.top + b.height / 2;
+      });
+      if (slot === -1) slot = others.length;
+      clearMarks();
+      if (slot < others.length) others[slot].classList.add('drop-before');
+      else if (others.length) others[others.length - 1].classList.add('drop-after');
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      clearMarks();
+      row.classList.remove('dragging');
+      row.style.transform = '';
+      if (!dragging) loopClip(clips[fromIdx]); // plain click previews the clip
+      else moveClip(fromIdx, slot);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function attachBoxDrag(row, track, clip) {
+    track.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      stopPreview();
+      const rect = track.getBoundingClientRect();
+      const toTime = (x) => (x - rect.left) / rect.width * clip.duration;
+      const win = Math.min(segDur(), clip.duration);
+      const t0 = toTime(e.clientX);
+      // Grabbing inside the box keeps the offset; elsewhere centers the box on the pointer
+      const grab = (t0 >= clip.start && t0 <= clip.start + win) ? t0 - clip.start : win / 2;
+      const apply = (ev) => {
+        clip.start = clamp(toTime(ev.clientX) - grab, 0, maxStart(clip));
+        positionClipBox(row, clip);
+        scrubTo(clip);
+      };
+      apply(e);
+      const onUp = () => {
+        window.removeEventListener('mousemove', apply);
+        window.removeEventListener('mouseup', onUp);
+        loopClip(clip);
+      };
+      window.addEventListener('mousemove', apply);
+      window.addEventListener('mouseup', onUp);
+    });
+  }
+
+  function renderList() {
+    list.innerHTML = '';
+    clips.forEach((clip, idx) => {
+      const li = document.createElement('li');
+      li.className = 'vidder-row' + (clip.duration < segDur() ? ' short' : '');
+      li.innerHTML = `
+        <div class="vidder-handle">
+          <span class="vidder-grip">⠿</span>
+          <span class="vidder-num">${idx + 1}</span>
+          <span class="vidder-name"></span>
+        </div>
+        <div class="vidder-track"><div class="vidder-box"></div></div>
+        <span class="vidder-time"></span>
+        <div class="joiner-item-btns">
+          <button data-dir="-1" ${idx === 0 ? 'disabled' : ''}>↑</button>
+          <button data-dir="1" ${idx === clips.length - 1 ? 'disabled' : ''}>↓</button>
+          <button data-remove>✕</button>
+        </div>
+      `;
+      const handle = li.querySelector('.vidder-handle');
+      const track = li.querySelector('.vidder-track');
+      li.querySelector('.vidder-name').textContent = clip.name;
+      handle.title = `${clip.name} • ${clip.width}×${clip.height} • ${fmtT(clip.duration)}`;
+      list.appendChild(li);
+
+      // Filmstrip sized so thumbs keep roughly their aspect at this track width
+      if (!clip.strip) {
+        const thumbW = track.clientHeight * (clip.width / clip.height) || 16;
+        const n = Math.min(80, Math.max(1, Math.round((track.clientWidth || 600) / thumbW)));
+        clip.strip = `/api/vidder/strip?path=${encodeURIComponent(clip.path)}&n=${n}&h=56&d=${clip.duration}`;
+      }
+      track.style.backgroundImage = `url("${clip.strip}")`;
+      positionClipBox(li, clip);
+
+      handle.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        startRowDrag(li, idx, e);
+      });
+      attachBoxDrag(li, track, clip);
+      li.querySelectorAll('[data-dir]').forEach(btn => {
+        btn.addEventListener('click', () => moveClip(idx, idx + parseInt(btn.dataset.dir, 10)));
+      });
+      li.querySelector('[data-remove]').addEventListener('click', () => {
+        stopPreview();
+        clips.splice(idx, 1);
+        clampAll();
+        updateStatus();
+        renderList();
+      });
+    });
+    renderMusic();
+    updateInfo();
+  }
+
+  // ---- Music track ----
+
+  function renderMusic() {
+    if (!music) return;
+    const total = totalDur();
+    musicBox.style.left = (music.start / music.duration * 100) + '%';
+    musicBox.style.width = (Math.min(1, total / music.duration) * 100) + '%';
+    musicBox.style.setProperty('--cut', clips.length ? (100 / clips.length) + '%' : '100%');
+    musicRangeEl.textContent = `${fmtT(music.start)} – ${fmtT(music.start + Math.min(total, music.duration))}`;
+  }
+
+  musicTrack.addEventListener('mousedown', (e) => {
+    if (!music || e.button !== 0) return;
+    e.preventDefault();
+    stopPreview();
+    const rect = musicTrack.getBoundingClientRect();
+    const toTime = (x) => (x - rect.left) / rect.width * music.duration;
+    const win = Math.min(totalDur(), music.duration);
+    const t0 = toTime(e.clientX);
+    const grab = (t0 >= music.start && t0 <= music.start + win) ? t0 - music.start : win / 2;
+    const apply = (ev) => {
+      music.start = clamp(toTime(ev.clientX) - grab, 0, music.duration - win);
+      renderMusic();
+      updateInfo();
+    };
+    apply(e);
+    const onUp = () => {
+      window.removeEventListener('mousemove', apply);
+      window.removeEventListener('mouseup', onUp);
+      if (clips.length) playSequence();
+    };
+    window.addEventListener('mousemove', apply);
+    window.addEventListener('mouseup', onUp);
+  });
+
+  function clearMusic() {
+    if (music) { music.audio.removeAttribute('src'); music.audio.load(); }
+    music = null;
+    setHidden(musicWrap, true);
+    musicBtn.textContent = 'Add Music (MP4/M4A)...';
+  }
+
+  async function setMusic(filePath, start) {
+    const info = await postJson('/api/probe', { filePath });
+    if (!info.duration) throw new Error('Could not read duration');
+    stopPreview();
+    clearMusic();
+    const audio = new Audio(fileUrl(filePath));
+    audio.preload = 'auto';
+    music = { path: filePath, name: info.filename, duration: info.duration, start, audio };
+    musicNameEl.textContent = music.name;
+    const mask = `url("/api/vidder/wave?path=${encodeURIComponent(music.path)}")`;
+    waveEl.style.webkitMaskImage = mask;
+    waveEl.style.maskImage = mask;
+    musicBtn.textContent = 'Change Music...';
+    setHidden(musicWrap, false);
+    clampAll();
+    renderMusic();
+    updateInfo();
+  }
+
+  musicBtn.addEventListener('click', async () => {
+    try {
+      const picked = await postJson('/api/browse', { accept: 'mp4,m4a,mp3,wav,mov' });
+      if (picked.canceled || !picked.paths || !picked.paths.length) return;
+      await setMusic(picked.paths[0], 0);
+      updateStatus();
+    } catch (err) { alert('Music error: ' + err.message); }
+  });
+
+  // ---- Add, save/load order, clear ----
+
+  addBtn.addEventListener('click', async () => {
+    try {
+      const picked = await postJson('/api/browse', { accept: 'mov,mp4,m4v', multiple: true });
+      if (picked.canceled || !picked.paths || !picked.paths.length) return;
+      const have = new Set(clips.concat(tossed).map(c => c.path));
+      const fresh = picked.paths.filter(p => !have.has(p)).sort(byName);
+      if (!fresh.length) return;
+      addBtn.disabled = true;
+      addBtn.textContent = 'Loading...';
+      const result = await postJson('/api/vidder/probe', { paths: fresh });
+      if (mode === 'seq') stopPreview();
+      appendClips(result.clips.map(c => ({ ...c, start: 0, strip: null })));
+      clampAll();
+      updateStatus();
+      renderList();
+      if (result.missing.length) {
+        alert(`Skipped ${result.missing.length} unreadable file(s):\n` + result.missing.map(p => p.split('/').pop()).join('\n'));
+      }
+    } catch (err) {
+      alert('Add error: ' + err.message);
+    } finally {
+      addBtn.disabled = false;
+      addBtn.textContent = 'Add Vids...';
+    }
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    try {
+      const slim = (c) => ({ path: c.path, start: c.start });
+      const first = clips[0] || tossed[0];
+      const result = await postJson('/api/vidder/save', {
+        data: {
+          app: 'fast-cut-music-vidder',
+          version: 1,
+          clipDur: clipDur(),
+          vertOnly: vertOnly.checked,
+          clips: clips.map(slim),
+          tossed: tossed.map(slim),
+          music: music ? { path: music.path, start: music.start } : null
+        },
+        defaultName: `${baseName()}_order.json`,
+        defaultDir: first ? dirOf(first.path) : null
+      });
+      if (!result.canceled) updateStatus(`saved ${result.path.split('/').pop()}`);
+    } catch (err) { alert('Save error: ' + err.message); }
+  });
+
+  loadBtn.addEventListener('click', async () => {
+    try {
+      const picked = await postJson('/api/browse', { accept: 'json' });
+      if (picked.canceled || !picked.paths || !picked.paths.length) return;
+      const data = await postJson('/api/vidder/read', { path: picked.paths[0] });
+      if (!Array.isArray(data.clips)) throw new Error('Not a vidder order file');
+      loadBtn.disabled = true;
+      loadBtn.textContent = 'Loading...';
+      const saved = data.clips.concat(Array.isArray(data.tossed) ? data.tossed : []);
+      const result = await postJson('/api/vidder/probe', { paths: saved.map(c => c.path) });
+      const byPath = new Map(result.clips.map(c => [c.path, c]));
+      const revive = (arr) => (Array.isArray(arr) ? arr : [])
+        .filter(c => byPath.has(c.path))
+        .map(c => ({ ...byPath.get(c.path), start: Number(c.start) || 0, strip: null }));
+      const missing = result.missing.slice();
+
+      stopPreview();
+      clipDurInput.value = data.clipDur || 2;
+      vertOnly.checked = !!data.vertOnly;
+      clips = revive(data.clips);
+      tossed = revive(data.tossed);
+      clearMusic();
+      if (data.music && data.music.path) {
+        try { await setMusic(data.music.path, Number(data.music.start) || 0); }
+        catch (_) { missing.push(data.music.path); }
+      }
+      clampAll();
+      updateStatus(`loaded ${picked.paths[0].split('/').pop()}`);
+      renderList();
+      if (missing.length) {
+        alert(`Couldn't find ${missing.length} file(s) from the order:\n` + missing.map(p => p.split('/').pop()).join('\n'));
+      }
+    } catch (err) {
+      alert('Load error: ' + err.message);
+    } finally {
+      loadBtn.disabled = false;
+      loadBtn.textContent = 'Load Order...';
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    stopPreview();
+    clips = [];
+    tossed = [];
+    clearMusic();
+    updateStatus();
+    renderList();
+  });
+
+  vertOnly.addEventListener('change', () => {
+    stopPreview();
+    if (vertOnly.checked) {
+      tossed = tossed.concat(clips.filter(c => !isVert(c)));
+      clips = clips.filter(isVert);
+    } else {
+      clips = clips.concat(tossed);
+      tossed = [];
+    }
+    clampAll();
+    updateStatus();
+    renderList();
+  });
+
+  clipDurInput.addEventListener('input', () => {
+    if (mode) stopPreview();
+    clampAll();
+    renderList();
+  });
+
+  // ---- Render ----
+
+  renderBtn.addEventListener('click', async () => {
+    if (!clips.length) return;
+    stopPreview();
+    renderBtn.disabled = true;
+    renderBtn.textContent = 'Rendering...';
+    setHidden(progress, false);
+    progressFill.style.width = '0%';
+    progressLabel.textContent = '0%';
+    const base = baseName();
+
+    try {
+      const resp = await fetch('/api/vidder/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clips: clips.map(c => ({ path: c.path, start: c.start })),
+          clipDur: clipDur(),
+          music: music ? { path: music.path, start: music.start } : null,
+          filename: `${base}_vidder.mp4`
+        })
+      });
+      if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `HTTP ${resp.status}`);
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          const msg = JSON.parse(part.slice(6));
+          if (msg.type === 'progress') {
+            progressFill.style.width = msg.percent + '%';
+            progressLabel.textContent = msg.percent + '%';
+          } else if (msg.type === 'complete') {
+            progressFill.style.width = '100%';
+            progressLabel.textContent = 'Done!';
+            const a = document.createElement('a');
+            a.href = msg.downloadUrl;
+            a.download = msg.filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+          } else if (msg.type === 'error') {
+            throw new Error(msg.error + (msg.details ? ': ' + msg.details : ''));
+          }
+        }
+      }
+    } catch (err) {
+      alert('Render failed: ' + err.message);
+      setHidden(progress, true);
+    } finally {
+      renderBtn.disabled = !clips.length;
+      renderBtn.textContent = 'Render';
+    }
+  });
+
+  showSlot(0);
+  updateStatus();
 })();
 
 // Kill & restart server

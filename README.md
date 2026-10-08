@@ -53,6 +53,9 @@ Browse a video, enter a speed multiplier (e.g. `4` for 4x, `0.5` for half speed)
 ### Reel/LinkedIn Timelapser
 Browse a set of "top" videos and a set of "bottom" videos. Set per-clip speed factors, then preview the stacked layout in Square (1:1 for LinkedIn) and Reels (9:16) mockups. Drag within each pane to reposition the crop, scroll wheel zooms in and out. Export both formats at once. Optional 4K (2160px wide) output.
 
+### Fast-Cut Music Vidder
+Click **Add Vids** and shift-click to pick several clips; click again to append more. Each loads as a row with a filmstrip. Set the clip duration (default 2s), then drag the box on each row to pick that clip's slice. The preview scrubs while you drag and loops the slice on release. Reorder by dragging rows or with the ↑/↓ buttons. Add music (MP4/M4A) and slide its frame along the waveform to pick the section; tick marks show where the cuts land, and **Play Sequence** previews the whole cut against the music. "Vert vids only" sets aside square and landscape clips. **Save Order** / **Load Order** write and read a JSON file with the clip order, each clip's slice, the music and its position, clip duration, and the vert-only setting. **Render** outputs a 2160×3840, 30fps MP4. Clip audio is dropped, so the music is the only soundtrack, and non-vertical clips are center-cropped to fill the frame.
+
 ---
 
 ## Tips

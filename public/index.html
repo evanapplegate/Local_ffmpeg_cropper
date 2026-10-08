@@ -317,6 +317,60 @@
         </div>
       </section>
 
+      <section class="vidder" id="vidder">
+        <h2>Fast-Cut Music Vidder</h2>
+        <p class="section-desc">Add clips (shift-click to pick several, click again to append more). Drag the box on each row to pick its slice, drag rows to reorder, add music and slide the frame to the part you want, then render a 2160 × 3840 MP4. Clip audio is dropped.</p>
+
+        <div class="drop-container">
+          <div class="vidder-top">
+            <button id="vidderAddBtn" class="browse-btn">Add Vids...</button>
+            <button id="vidderLoadBtn" class="browse-btn vidder-btn">Load Order...</button>
+            <button id="vidderSaveBtn" class="browse-btn vidder-btn" disabled>Save Order...</button>
+            <button id="vidderClearBtn" class="browse-btn vidder-btn" disabled>Clear</button>
+          </div>
+          <div id="vidderFileInfo" class="file-info-small" hidden></div>
+        </div>
+
+        <div id="vidderSection" hidden>
+          <div class="vidder-controls">
+            <label class="checkbox-label">Clip duration (sec): <input id="vidderClipDur" type="number" step="0.1" min="0.1" value="2" class="small-input"></label>
+            <label class="checkbox-label"><input type="checkbox" id="vidderVertOnly"> Vert vids only</label>
+            <button id="vidderMusicBtn" class="browse-btn vidder-btn">Add Music (MP4/M4A)...</button>
+          </div>
+
+          <div class="vidder-body">
+            <div class="vidder-main">
+              <div class="vidder-music" id="vidderMusic" hidden>
+                <div class="vidder-music-head">
+                  <span class="vidder-music-label">Music</span>
+                  <span class="vidder-music-name" id="vidderMusicName"></span>
+                  <span class="vidder-music-range" id="vidderMusicRange"></span>
+                </div>
+                <div class="vidder-track vidder-music-track" id="vidderMusicTrack">
+                  <div class="vidder-wave" id="vidderWave"></div>
+                  <div class="vidder-box vidder-music-box" id="vidderMusicBox"></div>
+                </div>
+              </div>
+              <ul id="vidderList" class="vidder-list"></ul>
+            </div>
+
+            <div class="vidder-side">
+              <div class="vidder-preview">
+                <video id="vidderPreviewA" muted playsinline preload="auto"></video>
+                <video id="vidderPreviewB" muted playsinline preload="auto"></video>
+              </div>
+              <button id="vidderPlayBtn" class="primary">Play Sequence</button>
+              <div class="vidder-info" id="vidderInfo"></div>
+              <button id="vidderRenderBtn" class="primary">Render</button>
+              <div id="vidderProgress" class="joiner-progress" hidden>
+                <div class="joiner-progress-bar"><div id="vidderProgressFill" class="joiner-progress-fill"></div></div>
+                <span id="vidderProgressLabel">0%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
     </div>
 
     <div id="logPanel" class="log-panel">

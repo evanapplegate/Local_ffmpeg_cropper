@@ -838,6 +838,207 @@ video {
   flex-wrap: wrap;
 }
 
+/* Fast-cut music vidder */
+.vidder {
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.vidder h2 {
+  margin: 0 0 20px;
+  font-size: 20px;
+}
+.vidder-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  margin: 16px 0;
+}
+.vidder-top {
+  display: flex;
+  gap: 8px;
+}
+.vidder-top #vidderAddBtn { flex: 1; margin-top: 0; }
+.vidder-btn {
+  display: inline-block;
+  width: auto;
+  margin-top: 0;
+  padding: 8px 16px;
+}
+.vidder-btn:disabled { opacity: 0.4; cursor: default; }
+.vidder-body {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+.vidder-main {
+  flex: 1;
+  min-width: 0;
+}
+.vidder-side {
+  width: 200px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.vidder-preview {
+  position: relative;
+  width: 200px;
+  aspect-ratio: 9 / 16;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.vidder-preview video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.vidder-preview video.hidden { visibility: hidden; }
+.vidder-info {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.vidder-info .warn { color: var(--danger); }
+.vidder-side .primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.vidder-side .joiner-progress[hidden] { display: none; }
+
+.vidder-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.vidder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding-left: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 3px;
+  position: relative;
+}
+.vidder-row.dragging {
+  z-index: 20;
+  opacity: 0.85;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+.vidder-row.drop-before { box-shadow: 0 -3px 0 0 var(--accent); }
+.vidder-row.drop-after { box-shadow: 0 3px 0 0 var(--accent); }
+.vidder-row.playing { border-color: var(--accent-2); }
+.vidder-handle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 170px;
+  flex-shrink: 0;
+  height: 100%;
+  cursor: grab;
+  user-select: none;
+  font-size: 12px;
+}
+.vidder-handle:active { cursor: grabbing; }
+.vidder-grip { opacity: 0.35; font-size: 11px; letter-spacing: -1px; }
+.vidder-num {
+  color: var(--muted);
+  min-width: 18px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.vidder-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vidder-row.short .vidder-name { color: var(--danger); }
+.vidder-time {
+  width: 46px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.vidder-row .joiner-item-btns { padding-right: 4px; }
+
+.vidder-track {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background-color: var(--track-bg);
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  overflow: hidden;
+  cursor: ew-resize;
+  user-select: none;
+}
+.vidder-box {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border: 2px solid var(--accent-2);
+  background: rgba(0, 209, 178, 0.12);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+  border-radius: 2px;
+  cursor: grab;
+  min-width: 4px;
+}
+.vidder-box:active { cursor: grabbing; }
+
+.vidder-music {
+  margin-bottom: 12px;
+}
+.vidder-music-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.vidder-music-label { font-weight: 600; color: var(--muted); }
+.vidder-music-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vidder-music-range { color: var(--muted); font-variant-numeric: tabular-nums; }
+.vidder-music-track {
+  flex: none;
+  height: 48px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.vidder-wave {
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  pointer-events: none;
+}
+/* Tick at every cut point inside the music frame */
+.vidder-music-box {
+  background-image: repeating-linear-gradient(to right,
+    transparent 0, transparent calc(var(--cut, 100%) - 1px),
+    rgba(255, 255, 255, 0.55) calc(var(--cut, 100%) - 1px), rgba(255, 255, 255, 0.55) var(--cut, 100%));
+}
+
 .verbose-log {
   background: #000;
   color: #00ff00;

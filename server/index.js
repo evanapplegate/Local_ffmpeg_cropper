@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 const { spawn, spawnSync } = require('child_process');
@@ -1604,6 +1605,281 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
     sendError('Timelapse failed', err.message);
     res.end();
     cleanup();
+  }
+});
+
+// ========== FAST-CUT MUSIC VIDDER ==========
+const VIDDER_CACHE = path.join(TMP_DIR, 'vidder_cache');
+if (!fs.existsSync(VIDDER_CACHE)) fs.mkdirSync(VIDDER_CACHE, { recursive: true });
+
+function runCapture(cmd, args) {
+  return new Promise((resolve) => {
+    const p = spawn(cmd, args);
+    let stdout = '', stderr = '';
+    p.stdout.on('data', d => { stdout += d.toString(); });
+    p.stderr.on('data', d => { stderr = tail(stderr + d.toString(), 2000); });
+    p.on('close', code => resolve({ code, stdout, stderr }));
+    p.on('error', err => resolve({ code: -1, stdout, stderr: err.message }));
+  });
+}
+
+// Display dimensions (rotation-aware) + duration for one clip
+async function vidderProbe(filePath) {
+  const r = await runCapture('ffprobe', ['-v', 'quiet', '-print_format', 'json',
+    '-show_format', '-show_streams', filePath]);
+  if (r.code !== 0) return null;
+  try {
+    const info = JSON.parse(r.stdout);
+    const v = (info.streams || []).find(s => s.codec_type === 'video');
+    if (!v) return null;
+    const rotTag = v.tags && v.tags.rotate;
+    const rotSide = (v.side_data_list || []).find(sd => sd.rotation !== undefined);
+    const rot = Math.abs(Number(rotSide ? rotSide.rotation : rotTag) || 0) % 180;
+    let width = parseInt(v.width, 10), height = parseInt(v.height, 10);
+    if (rot === 90) [width, height] = [height, width];
+    const duration = parseFloat((info.format || {}).duration) || parseFloat(v.duration) || 0;
+    if (!duration || !width || !height) return null;
+    return { path: filePath, name: path.basename(filePath), duration, width, height };
+  } catch (_) { return null; }
+}
+
+// Probe a list of clip paths (input order kept); unreadable ones come back in `missing`
+app.post('/api/vidder/probe', async (req, res) => {
+  const paths = Array.isArray(req.body.paths) ? req.body.paths.map(String) : [];
+  const results = new Array(paths.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < paths.length) {
+      const i = next++;
+      results[i] = fs.existsSync(paths[i]) ? await vidderProbe(paths[i]) : null;
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  const missing = paths.filter((_, i) => !results[i]);
+  log('VIDDER probe', `${paths.length - missing.length}/${paths.length} readable`);
+  res.json({ clips: results.filter(Boolean), missing });
+});
+
+// Save an order file via the native Save dialog
+app.post('/api/vidder/save', (req, res) => {
+  const data = req.body.data;
+  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'No data' });
+  const asStr = (v) => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+  const name = String(req.body.defaultName || 'vidder_order.json');
+  const dir = req.body.defaultDir && fs.existsSync(req.body.defaultDir) ? req.body.defaultDir : null;
+  const script = `POSIX path of (choose file name with prompt "Save clip order" default name ${asStr(name)}` +
+    (dir ? ` default location (POSIX file ${asStr(dir)})` : '') + ')';
+  const proc = spawn('osascript', ['-e', script]);
+  let stdout = '', stderr = '';
+  proc.stdout.on('data', d => { stdout += d.toString(); });
+  proc.stderr.on('data', d => { stderr += d.toString(); });
+  proc.on('close', code => {
+    if (code !== 0) {
+      if (stderr.includes('User canceled') || code === 1) return res.json({ canceled: true });
+      log('VIDDER save dialog error', stderr);
+      return res.status(500).json({ error: 'Save dialog failed', details: stderr });
+    }
+    let out = stdout.trim();
+    if (!/\.json$/i.test(out)) out += '.json';
+    try {
+      fs.writeFileSync(out, JSON.stringify(data, null, 2));
+    } catch (err) {
+      return res.status(500).json({ error: 'Write failed: ' + err.message });
+    }
+    log('VIDDER saved order', out);
+    res.json({ canceled: false, path: out });
+  });
+});
+
+// Read an order file
+app.post('/api/vidder/read', (req, res) => {
+  const filePath = req.body.path;
+  if (!filePath || !fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+  try {
+    res.json(JSON.parse(fs.readFileSync(filePath, 'utf8')));
+  } catch (_) {
+    res.status(400).json({ error: 'Not a valid order file' });
+  }
+});
+
+function vidderCachePath(filePath, extra, ext) {
+  const stat = fs.statSync(filePath);
+  const key = crypto.createHash('sha1').update(`${filePath}|${stat.mtimeMs}|${stat.size}|${extra}`).digest('hex');
+  return path.join(VIDDER_CACHE, key + ext);
+}
+
+// Filmstrip of n keyframe thumbs, h px tall, tiled horizontally
+app.get('/api/vidder/strip', async (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath || !fs.existsSync(filePath)) return res.status(404).send('Not found');
+  const n = Math.min(80, Math.max(1, parseInt(req.query.n, 10) || 10));
+  const h = Math.min(120, Math.max(16, parseInt(req.query.h, 10) || 56));
+  const d = parseFloat(req.query.d) || 0;
+  if (!(d > 0)) return res.status(400).send('Missing duration');
+  const out = vidderCachePath(filePath, `strip|${n}|${h}`, '.jpg');
+  if (!fs.existsSync(out)) {
+    // Keyframes only (fast), cloned past the last keyframe so fps can always fill n slots
+    const r = await runCapture('ffmpeg', ['-hide_banner', '-v', 'error', '-skip_frame', 'nokey',
+      '-i', filePath,
+      '-vf', `scale=-2:${h},tpad=stop_mode=clone:stop_duration=${d.toFixed(3)},fps=${(n / d).toFixed(6)},tile=${n}x1`,
+      '-frames:v', '1', '-q:v', '5', '-y', out]);
+    if (r.code !== 0 || !fs.existsSync(out)) {
+      log('VIDDER strip failed', path.basename(filePath), r.stderr);
+      return res.status(500).send('Strip failed');
+    }
+  }
+  res.sendFile(out);
+});
+
+// Waveform PNG (white on transparent; the client tints it via CSS mask)
+app.get('/api/vidder/wave', async (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath || !fs.existsSync(filePath)) return res.status(404).send('Not found');
+  const out = vidderCachePath(filePath, 'wave', '.png');
+  if (!fs.existsSync(out)) {
+    const r = await runCapture('ffmpeg', ['-hide_banner', '-v', 'error', '-i', filePath,
+      '-filter_complex', 'aformat=channel_layouts=mono,showwavespic=s=2000x120:colors=white:scale=sqrt',
+      '-frames:v', '1', '-y', out]);
+    if (r.code !== 0 || !fs.existsSync(out)) {
+      log('VIDDER wave failed', path.basename(filePath), r.stderr);
+      return res.status(500).send('Waveform failed');
+    }
+  }
+  res.sendFile(out);
+});
+
+// Render: JSON { clips: [{path, start}], clipDur, music: {path, start} | null, filename }
+// Each slice is encoded to an identical 2160x3840 30fps segment (clip audio dropped),
+// then segments are stream-copied together and the music window is muxed on top.
+app.post('/api/vidder/render', async (req, res) => {
+  const clips = Array.isArray(req.body.clips) ? req.body.clips : [];
+  if (!clips.length) return res.status(400).json({ error: 'No clips provided' });
+  for (const c of clips) {
+    if (!c || !c.path || !fs.existsSync(c.path)) return res.status(400).json({ error: `File not found: ${c && c.path}` });
+  }
+  const music = req.body.music && req.body.music.path ? req.body.music : null;
+  if (music && !fs.existsSync(music.path)) return res.status(400).json({ error: `Music not found: ${music.path}` });
+
+  const OUT_W = 2160, OUT_H = 3840, FPS = 30;
+  const clipDur = Math.min(60, Math.max(0.1, parseFloat(req.body.clipDur) || 2));
+  const segFrames = Math.max(1, Math.round(clipDur * FPS));
+  const segDur = segFrames / FPS;
+  const total = segDur * clips.length;
+  const musicStart = music ? Math.max(0, parseFloat(music.start) || 0) : 0;
+
+  const clientFilename = (req.body.filename || 'vidder').replace(/[^A-Za-z0-9_.-]/g, '_');
+  const outName = clientFilename.endsWith('.mp4') ? clientFilename : `${clientFilename}.mp4`;
+  const stamp = Date.now();
+  const workDir = path.join(TMP_DIR, `vidder_${stamp}`);
+  const outputPath = path.join(TMP_DIR, `vidder_${stamp}.mp4`);
+  fs.mkdirSync(workDir, { recursive: true });
+
+  log('VIDDER render start', { clips: clips.length, clipDur: segDur, total, music: music && path.basename(music.path), musicStart });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  const sendProgress = (pct) => res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
+
+  const procs = new Set();
+  let finished = false;
+  let aborted = false;
+  res.on('close', () => {
+    if (finished) return;
+    aborted = true;
+    log('VIDDER client disconnected, killing ffmpeg');
+    procs.forEach(p => { try { p.kill('SIGKILL'); } catch (_) {} });
+  });
+
+  const run = (args, label) => new Promise((resolve, reject) => {
+    if (aborted) return reject(new Error('Aborted'));
+    const ff = spawn('ffmpeg', args);
+    procs.add(ff);
+    let stderr = '';
+    const logger = makeStderrLogger(label);
+    ff.stderr.on('data', d => { stderr = tail(stderr + d.toString(), 2000); logger(d); });
+    ff.on('close', code => {
+      procs.delete(ff);
+      if (code === 0) resolve();
+      else reject(new Error(aborted ? 'Aborted' : `${label} failed: ${tail(stderr)}`));
+    });
+    ff.on('error', err => { procs.delete(ff); reject(err); });
+  });
+
+  const segPaths = clips.map((_, i) => path.join(workDir, `seg_${String(i).padStart(4, '0')}.mp4`));
+  try {
+    // Fill/crop to 9:16, force CFR, pad short clips by holding the last frame,
+    // and cap at an exact frame count so every cut lands on the same grid
+    const vf = [
+      `fps=${FPS}`,
+      `scale=${OUT_W}:${OUT_H}:force_original_aspect_ratio=increase:flags=lanczos`,
+      `crop=${OUT_W}:${OUT_H}`,
+      'setsar=1',
+      `tpad=stop_mode=clone:stop_duration=${segDur.toFixed(3)}`,
+      'format=yuv420p',
+    ].join(',');
+
+    let done = 0, nextIdx = 0, segErr = null;
+    const worker = async () => {
+      while (nextIdx < clips.length && !segErr) {
+        const i = nextIdx++;
+        const start = Math.max(0, parseFloat(clips[i].start) || 0);
+        try {
+          await run(['-hide_banner', '-ss', start.toFixed(3), '-t', (segDur + 1).toFixed(3),
+            '-i', clips[i].path, '-vf', vf, '-frames:v', String(segFrames), '-an',
+            '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+            '-profile:v', 'high', '-level', '5.1', '-pix_fmt', 'yuv420p',
+            '-y', segPaths[i]], `VIDDER seg${i + 1}`);
+        } catch (err) {
+          // First failure wins; stop the other worker too
+          if (!segErr) segErr = new Error(`${path.basename(clips[i].path)}: ${err.message}`);
+          procs.forEach(p => { try { p.kill('SIGKILL'); } catch (_) {} });
+          return;
+        }
+        done++;
+        sendProgress(Math.round((done / clips.length) * 90));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(2, clips.length) }, worker));
+    if (segErr) throw segErr;
+
+    const listPath = path.join(workDir, 'list.txt');
+    fs.writeFileSync(listPath, segPaths.map(p => `file '${p}'`).join('\n'));
+
+    const muxArgs = ['-hide_banner', '-f', 'concat', '-safe', '0', '-i', listPath];
+    if (music) {
+      // 1s fade in and out (halved on very short cuts so they don't overlap)
+      const fadeDur = Math.min(1, total / 2);
+      muxArgs.push('-ss', musicStart.toFixed(3), '-t', total.toFixed(3), '-i', music.path,
+        '-map', '0:v', '-map', '1:a:0', '-c:v', 'copy',
+        '-af', `afade=t=in:st=0:d=${fadeDur.toFixed(3)},afade=t=out:st=${(total - fadeDur).toFixed(3)}:d=${fadeDur.toFixed(3)}`,
+        '-c:a', 'aac', '-b:a', '256k');
+    } else {
+      muxArgs.push('-map', '0:v', '-c:v', 'copy', '-an');
+    }
+    muxArgs.push('-movflags', '+faststart', '-y', outputPath);
+    log('VIDDER mux:', muxArgs.join(' '));
+    await run(muxArgs, 'VIDDER mux');
+
+    fs.rm(workDir, { recursive: true, force: true }, () => {});
+    finished = true;
+    sendProgress(100);
+    const stat = fs.statSync(outputPath);
+    log('VIDDER done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
+    const dlId = path.basename(outputPath);
+    pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => fs.unlink(outputPath, () => {}) });
+    res.write(`data: ${JSON.stringify({ type: 'complete', downloadUrl: `/api/download/${dlId}`, filename: outName })}\n\n`);
+    res.end();
+  } catch (err) {
+    finished = true;
+    log('VIDDER failed', err.message);
+    aborted = true;
+    procs.forEach(p => { try { p.kill('SIGKILL'); } catch (_) {} });
+    fs.rm(workDir, { recursive: true, force: true }, () => {});
+    fs.unlink(outputPath, () => {});
+    res.write(`data: ${JSON.stringify({ type: 'error', error: 'Render failed', details: err.message })}\n\n`);
+    res.end();
   }
 });
 
