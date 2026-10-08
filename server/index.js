@@ -1167,7 +1167,7 @@ app.post('/api/speedup', upload.single('video'), async (req, res) => {
         batch.push(new Promise((resolve) => {
           const ff = spawn('ffmpeg', [
             '-hide_banner', '-ss', String(ts), '-i', speedSrcPath,
-            '-frames:v', '1', '-q:v', '2', '-y', framePath
+            '-frames:v', '1', '-q:v', '1', '-y', framePath
           ]);
           // Tolerate undecodable frames (e.g. at/near EOF) — skip rather than fail the whole render
           ff.on('close', code => { if (code === 0 && fs.existsSync(framePath)) extracted++; else failed++; resolve(); });
@@ -1431,11 +1431,11 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
           for (let fj = fi; fj < Math.min(fi + batchSize, totalFrames); fj++) {
             // Clamp seek just inside EOF so the final frames still decode
             const ts = Math.min(fj * interval, Math.max(0, fileDuration - 0.05));
-            const framePath = path.join(framesDir, `frame_${String(fj).padStart(6, '0')}.jpg`);
+            const framePath = path.join(framesDir, `frame_${String(fj).padStart(6, '0')}.png`);
             batch.push(new Promise((resolve) => {
               const ff = spawn('ffmpeg', [
                 '-hide_banner', '-ss', String(ts), '-i', file.path,
-                '-frames:v', '1', '-q:v', '2', '-y', framePath
+                '-frames:v', '1', '-compression_level', '1', '-y', framePath
               ]);
               // Tolerate a frame that can't be decoded (e.g. at/near EOF) — skip it rather than failing the whole render
               ff.on('close', code => { if (code === 0 && fs.existsSync(framePath)) extracted++; else failed++; resolve(); });
@@ -1458,7 +1458,7 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
         // Glob the files so gaps (skipped frames) don't break the sequence.
         const stitchArgs = [
           '-hide_banner', '-framerate', '30',
-          '-pattern_type', 'glob', '-i', path.join(framesDir, 'frame_*.jpg'),
+          '-pattern_type', 'glob', '-i', path.join(framesDir, 'frame_*.png'),
           '-i', file.path,
           '-map', '0:v:0',
         ];
@@ -1469,7 +1469,7 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
             stitchArgs.push('-map', '1:a?', '-c:a', 'copy');
           }
         }
-        stitchArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-y', clipPath);
+        stitchArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '14', '-pix_fmt', 'yuv420p', '-y', clipPath);
         await runFfmpeg(stitchArgs, 0, 0);
 
         fs.rm(framesDir, { recursive: true, force: true }, () => {});
@@ -1483,7 +1483,7 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
           if (audioFilter) ffArgs.push('-af', audioFilter, '-c:a', 'aac', '-b:a', '192k');
           else ffArgs.push('-c:a', 'copy');
         }
-        ffArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-y', clipPath);
+        ffArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '14', '-pix_fmt', 'yuv420p', '-y', clipPath);
         await runFfmpeg(ffArgs, 0, 0);
       }
       
@@ -1542,9 +1542,9 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
     const sqBX = sqBottomCropX >= 0 ? sqBottomCropX : `(iw-${baseWidth})/2`;
     const sqBY = sqBottomCropY >= 0 ? sqBottomCropY : `(ih-${halfHeight})/2`;
     const liFilter = `
-      [0:v]fps=30,scale=${sqTopScaleW}:-2,crop=${baseWidth}:${halfHeight}:${sqTX}:${sqTY}[v1];
-      [1:v]fps=30,scale=${sqBotScaleW}:-2,crop=${baseWidth}:${halfHeight}:${sqBX}:${sqBY}[v2];
-      [v1][v2]vstack=inputs=2,scale=${baseWidth}:${fullHeight}
+      [0:v]fps=30,scale=${sqTopScaleW}:-2:flags=lanczos,crop=${baseWidth}:${halfHeight}:${sqTX}:${sqTY}[v1];
+      [1:v]fps=30,scale=${sqBotScaleW}:-2:flags=lanczos,crop=${baseWidth}:${halfHeight}:${sqBX}:${sqBY}[v2];
+      [v1][v2]vstack=inputs=2
     `.replace(/\s+/g, '');
     
     await runFfmpeg([
@@ -1552,8 +1552,8 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
       '-i', topPanePath, '-i', bottomPanePath,
       '-filter_complex', liFilter,
       ...audioMap,
-      '-r', '30', '-c:v', 'libx264', '-crf', '10', '-preset', 'fast', '-pix_fmt', 'yuv420p',
-      '-maxrate', '5M', '-bufsize', '10M',
+      '-r', '30', '-c:v', 'libx264', '-crf', '10', '-preset', 'slow', '-pix_fmt', 'yuv420p',
+      '-profile:v', 'high', '-level', '4.2',
       ...audioCodec,
       '-movflags', '+faststart', '-y', liPath
     ], 40, 0.3);
@@ -1574,8 +1574,8 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
     const rBX = reelsBottomCropX >= 0 ? reelsBottomCropX : `(iw-${baseWidth})/2`;
     const rBY = reelsBottomCropY >= 0 ? reelsBottomCropY : '0';
     const reelsFilter = `
-      [0:v]fps=30,scale=-2:${reelsTopScaleH},crop=${baseWidth}:${reelsHalfHeight}:${rTX}:${rTY}[v1];
-      [1:v]fps=30,scale=-2:${reelsBotScaleH},crop=${baseWidth}:${reelsHalfHeight}:${rBX}:${rBY}[v2];
+      [0:v]fps=30,scale=-2:${reelsTopScaleH}:flags=lanczos,crop=${baseWidth}:${reelsHalfHeight}:${rTX}:${rTY}[v1];
+      [1:v]fps=30,scale=-2:${reelsBotScaleH}:flags=lanczos,crop=${baseWidth}:${reelsHalfHeight}:${rBX}:${rBY}[v2];
       [v1][v2]vstack=inputs=2
     `.replace(/\s+/g, '');
 
@@ -1584,7 +1584,8 @@ app.post('/api/timelapse', upload.fields([{ name: 'top' }, { name: 'bottom' }]),
       '-i', topPanePath, '-i', bottomPanePath,
       '-filter_complex', reelsFilter,
       ...audioMap,
-      '-r', '30', '-c:v', 'libx264', '-crf', '10', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+      '-r', '30', '-c:v', 'libx264', '-crf', '10', '-preset', 'slow', '-pix_fmt', 'yuv420p',
+      '-profile:v', 'high', '-level', '4.2',
       ...audioCodec,
       '-movflags', '+faststart', '-y', reelsPath
     ], 70, 0.3);
