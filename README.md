@@ -1,6 +1,8 @@
 # Local FFmpeg Tools
 
-A browser UI for everyday ffmpeg jobs, backed by a small local Node server. Files are read in place by path, so nothing is uploaded and 10GB+ files are fine.
+Some localhost ffmpeg-mediated video editing tools, gentle optima type, might be something for your agent to scaffold atop. –Evan
+
+Runs as a browser UI backed by a small local Node server. Files are read in place by path, so nothing is uploaded and 10GB+ files are fine.
 
 ## Requirements
 
