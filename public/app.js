@@ -2700,7 +2700,7 @@
   const progressFill = $('vidderProgressFill');
   const progressLabel = $('vidderProgressLabel');
 
-  let clips = [];   // [{path, name, duration, width, height, start, strip}]
+  let clips = [];   // [{path, name, duration, width, height, start, dur, strip}]
   let tossed = [];  // non-vertical clips set aside by "Vert vids only"
   let music = null; // {path, name, duration, start, audio}
   let mode = null;  // null | 'loop' | 'seq'
@@ -2708,19 +2708,19 @@
   let raf = 0;
 
   const fileUrl = (p) => `/api/localfile?path=${encodeURIComponent(p)}`;
-  const clipDur = () => Math.max(0.1, parseFloat(clipDurInput.value) || 2);
+  const MIN_DUR = 0.1;
+  const clipDur = () => Math.max(MIN_DUR, parseFloat(clipDurInput.value) || 2);
   // Server snaps each slice to whole 30fps frames; mirror that so preview timing matches
-  const segDur = () => Math.max(1, Math.round(clipDur() * 30)) / 30;
-  const totalDur = () => segDur() * clips.length;
+  const segOf = (c) => Math.max(1, Math.round(Math.min(c.dur, c.duration) * 30)) / 30;
+  const totalDur = () => clips.reduce((sum, c) => sum + segOf(c), 0);
   const isVert = (c) => c.height > c.width;
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
-  const maxStart = (c) => Math.max(0, c.duration - segDur());
+  const maxStart = (c) => Math.max(0, c.duration - segOf(c));
   const fmtT = (s) => {
     const ds = Math.round(s * 10);
     const m = Math.floor(ds / 600);
     return `${m}:${((ds - m * 600) / 10).toFixed(1).padStart(4, '0')}`;
   };
-  const fmtDur = (s) => s.toFixed(2).replace(/\.?0+$/, '');
   const dirOf = (p) => p.replace(/\/[^/]*$/, '');
   const byName = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
   // Output/order file base name: folder of the first clip
@@ -2730,7 +2730,10 @@
   };
 
   function clampAll() {
-    clips.forEach(c => { c.start = clamp(c.start, 0, maxStart(c)); });
+    clips.forEach(c => {
+      c.dur = clamp(c.dur, MIN_DUR, c.duration);
+      c.start = clamp(c.start, 0, maxStart(c));
+    });
     if (music) music.start = clamp(music.start, 0, music.duration - totalDur());
   }
 
@@ -2754,7 +2757,7 @@
   function updateInfo() {
     const n = clips.length;
     const total = totalDur();
-    let html = `${n} clip${n === 1 ? '' : 's'} × ${fmtDur(segDur())}s = <strong>${fmtT(total)}</strong>`;
+    let html = `${n} clip${n === 1 ? '' : 's'} = <strong>${fmtT(total)}</strong>`;
     if (music) {
       html += `<br>Music ${fmtT(music.start)} – ${fmtT(music.start + Math.min(total, music.duration))}`;
       if (music.duration < total) {
@@ -2762,10 +2765,6 @@
       }
     } else {
       html += '<br>No music (renders silent)';
-    }
-    const shorts = clips.filter(c => c.duration < segDur()).length;
-    if (shorts) {
-      html += `<br><span class="warn">${shorts} clip${shorts === 1 ? '' : 's'} shorter than ${fmtDur(segDur())}s (last frame held)</span>`;
     }
     infoEl.innerHTML = html;
     renderBtn.disabled = !n;
@@ -2823,14 +2822,14 @@
     });
   }
 
-  // While dragging a box: show the frame at the box start, coalescing seeks
-  function scrubTo(clip) {
+  // While dragging a box: show the frame at time t, coalescing seeks
+  function scrubTo(clip, t) {
     const v = vids[0];
     showSlot(0);
     v.pause();
-    v._want = clip.start;
-    if (v.dataset.path !== clip.path) cue(v, clip, clip.start);
-    else if (!v.seeking && v.readyState >= 1) v.currentTime = clip.start;
+    v._want = t;
+    if (v.dataset.path !== clip.path) cue(v, clip, t);
+    else if (!v.seeking && v.readyState >= 1) v.currentTime = t;
   }
   vids[0].addEventListener('seeked', () => {
     const v = vids[0];
@@ -2842,7 +2841,7 @@
     const token = modeToken;
     mode = 'loop';
     const v = vids[0];
-    const end = clip.start + segDur();
+    const end = clip.start + segOf(clip);
     showSlot(0);
     highlight(clip);
     await cue(v, clip, clip.start);
@@ -2867,8 +2866,10 @@
     const token = modeToken;
     mode = 'seq';
     playBtn.textContent = 'Stop';
-    const D = segDur();
     const order = clips.slice();
+    // Cumulative cut times: clip i plays from ends[i - 1] to ends[i]
+    const ends = [];
+    order.reduce((t, c) => { ends.push(t + segOf(c)); return t + segOf(c); }, 0);
     await cue(vids[0], order[0], order[0].start);
     if (token !== modeToken) return;
     if (music) {
@@ -2880,7 +2881,9 @@
     let cur = -1;
     const tick = () => {
       if (token !== modeToken) return;
-      const i = Math.floor((performance.now() - t0) / 1000 / D);
+      const elapsed = (performance.now() - t0) / 1000;
+      let i = Math.max(cur, 0);
+      while (i < order.length && elapsed >= ends[i]) i++;
       if (i >= order.length) { stopPreview(); return; }
       if (i !== cur) {
         cur = i;
@@ -2908,8 +2911,8 @@
   function positionClipBox(row, clip) {
     const box = row.querySelector('.vidder-box');
     box.style.left = (clip.start / clip.duration * 100) + '%';
-    box.style.width = (Math.min(1, segDur() / clip.duration) * 100) + '%';
-    row.querySelector('.vidder-time').textContent = fmtT(clip.start);
+    box.style.width = (Math.min(1, segOf(clip) / clip.duration) * 100) + '%';
+    row.querySelector('.vidder-time').textContent = `${segOf(clip).toFixed(2)}s @ ${fmtT(clip.start)}`;
   }
 
   function moveClip(from, to) {
@@ -2957,6 +2960,7 @@
     window.addEventListener('mouseup', onUp);
   }
 
+  // Middle of the box moves the slice; its edges set the slice's start/end (its length)
   function attachBoxDrag(row, track, clip) {
     track.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
@@ -2964,14 +2968,30 @@
       stopPreview();
       const rect = track.getBoundingClientRect();
       const toTime = (x) => (x - rect.left) / rect.width * clip.duration;
-      const win = Math.min(segDur(), clip.duration);
+      const edge = e.target.dataset.edge;
+      const win = segOf(clip);
       const t0 = toTime(e.clientX);
+      const end0 = clip.start + win;
       // Grabbing inside the box keeps the offset; elsewhere centers the box on the pointer
-      const grab = (t0 >= clip.start && t0 <= clip.start + win) ? t0 - clip.start : win / 2;
+      const grab = (t0 >= clip.start && t0 <= end0) ? t0 - clip.start : win / 2;
       const apply = (ev) => {
-        clip.start = clamp(toTime(ev.clientX) - grab, 0, maxStart(clip));
+        const t = toTime(ev.clientX);
+        if (edge === 'r') {
+          clip.dur = clamp(t, clip.start + MIN_DUR, clip.duration) - clip.start;
+        } else if (edge === 'l') {
+          clip.start = clamp(t, 0, end0 - MIN_DUR);
+          clip.dur = end0 - clip.start;
+        } else {
+          clip.start = clamp(t - grab, 0, maxStart(clip));
+        }
         positionClipBox(row, clip);
-        scrubTo(clip);
+        // Show the frame at whichever edge is being set
+        scrubTo(clip, edge === 'r' ? Math.max(clip.start, clip.start + segOf(clip) - 1 / 30) : clip.start);
+        if (edge) {
+          if (music) music.start = clamp(music.start, 0, music.duration - totalDur());
+          renderMusic();
+          updateInfo();
+        }
       };
       apply(e);
       const onUp = () => {
@@ -2988,14 +3008,14 @@
     list.innerHTML = '';
     clips.forEach((clip, idx) => {
       const li = document.createElement('li');
-      li.className = 'vidder-row' + (clip.duration < segDur() ? ' short' : '');
+      li.className = 'vidder-row';
       li.innerHTML = `
         <div class="vidder-handle">
           <span class="vidder-grip">⠿</span>
           <span class="vidder-num">${idx + 1}</span>
           <span class="vidder-name"></span>
         </div>
-        <div class="vidder-track"><div class="vidder-box"></div></div>
+        <div class="vidder-track"><div class="vidder-box"><div class="vidder-edge l" data-edge="l"></div><div class="vidder-edge r" data-edge="r"></div></div></div>
         <span class="vidder-time"></span>
         <div class="joiner-item-btns">
           <button data-dir="-1" ${idx === 0 ? 'disabled' : ''}>↑</button>
@@ -3046,7 +3066,16 @@
     const total = totalDur();
     musicBox.style.left = (music.start / music.duration * 100) + '%';
     musicBox.style.width = (Math.min(1, total / music.duration) * 100) + '%';
-    musicBox.style.setProperty('--cut', clips.length ? (100 / clips.length) + '%' : '100%');
+    // A tick at every cut, positioned by cumulative clip length
+    musicBox.querySelectorAll('.vidder-cut').forEach(el => el.remove());
+    let t = 0;
+    clips.slice(0, -1).forEach(c => {
+      t += segOf(c);
+      const tick = document.createElement('div');
+      tick.className = 'vidder-cut';
+      tick.style.left = (t / total * 100) + '%';
+      musicBox.appendChild(tick);
+    });
     musicRangeEl.textContent = `${fmtT(music.start)} – ${fmtT(music.start + Math.min(total, music.duration))}`;
   }
 
@@ -3122,7 +3151,7 @@
       addBtn.textContent = 'Loading...';
       const result = await postJson('/api/vidder/probe', { paths: fresh });
       if (mode === 'seq') stopPreview();
-      appendClips(result.clips.map(c => ({ ...c, start: 0, strip: null })));
+      appendClips(result.clips.map(c => ({ ...c, start: 0, dur: clipDur(), strip: null })));
       clampAll();
       updateStatus();
       renderList();
@@ -3139,12 +3168,12 @@
 
   saveBtn.addEventListener('click', async () => {
     try {
-      const slim = (c) => ({ path: c.path, start: c.start });
+      const slim = (c) => ({ path: c.path, start: c.start, dur: c.dur });
       const first = clips[0] || tossed[0];
       const result = await postJson('/api/vidder/save', {
         data: {
           app: 'fast-cut-music-vidder',
-          version: 1,
+          version: 2,
           clipDur: clipDur(),
           vertOnly: vertOnly.checked,
           clips: clips.map(slim),
@@ -3160,7 +3189,8 @@
 
   loadBtn.addEventListener('click', async () => {
     try {
-      const picked = await postJson('/api/browse', { accept: 'json' });
+      // Finder's picker wants the UTI for JSON; the bare extension leaves files greyed out
+      const picked = await postJson('/api/browse', { accept: 'json,public.json' });
       if (picked.canceled || !picked.paths || !picked.paths.length) return;
       const data = await postJson('/api/vidder/read', { path: picked.paths[0] });
       if (!Array.isArray(data.clips)) throw new Error('Not a vidder order file');
@@ -3171,7 +3201,7 @@
       const byPath = new Map(result.clips.map(c => [c.path, c]));
       const revive = (arr) => (Array.isArray(arr) ? arr : [])
         .filter(c => byPath.has(c.path))
-        .map(c => ({ ...byPath.get(c.path), start: Number(c.start) || 0, strip: null }));
+        .map(c => ({ ...byPath.get(c.path), start: Number(c.start) || 0, dur: Number(c.dur) || Number(data.clipDur) || 2, strip: null }));
       const missing = result.missing.slice();
 
       stopPreview();
@@ -3221,8 +3251,10 @@
     renderList();
   });
 
-  clipDurInput.addEventListener('input', () => {
+  // The default only applies to clips added from now on; "Apply to all" resets every clip
+  $('vidderApplyAllBtn').addEventListener('click', () => {
     if (mode) stopPreview();
+    clips.concat(tossed).forEach(c => { c.dur = clipDur(); });
     clampAll();
     renderList();
   });
@@ -3244,7 +3276,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          clips: clips.map(c => ({ path: c.path, start: c.start })),
+          clips: clips.map(c => ({ path: c.path, start: c.start, dur: segOf(c) })),
           clipDur: clipDur(),
           music: music ? { path: music.path, start: music.start } : null,
           filename: `${base}_vidder.mp4`

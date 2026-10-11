@@ -963,7 +963,8 @@ video {
 }
 .vidder-row.short .vidder-name { color: var(--danger); }
 .vidder-time {
-  width: 46px;
+  width: 92px;
+  white-space: nowrap;
   flex-shrink: 0;
   font-size: 11px;
   color: var(--muted);
@@ -1032,11 +1033,35 @@ video {
   mask-repeat: no-repeat;
   pointer-events: none;
 }
+/* Edge grips on each clip box: drag to set that clip's length */
+.vidder-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  cursor: ew-resize;
+  z-index: 1;
+}
+.vidder-edge.l { left: -6px; }
+.vidder-edge.r { right: -6px; }
+.vidder-edge::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 25%;
+  bottom: 25%;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent-2);
+}
 /* Tick at every cut point inside the music frame */
-.vidder-music-box {
-  background-image: repeating-linear-gradient(to right,
-    transparent 0, transparent calc(var(--cut, 100%) - 1px),
-    rgba(255, 255, 255, 0.55) calc(var(--cut, 100%) - 1px), rgba(255, 255, 255, 0.55) var(--cut, 100%));
+.vidder-cut {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.55);
+  pointer-events: none;
 }
 
 .verbose-log {

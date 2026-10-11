@@ -319,7 +319,7 @@
 
       <section class="vidder" id="vidder">
         <h2>Fast-Cut Music Vidder</h2>
-        <p class="section-desc">Add clips (shift-click to pick several, click again to append more). Drag the box on each row to pick its slice, drag rows to reorder, add music and slide the frame to the part you want, then render a 2160 × 3840 MP4. Clip audio is dropped.</p>
+        <p class="section-desc">Add clips (shift-click to pick several, click again to append more). Drag the box on each row to pick its slice (drag its edges to set that clip's length), drag rows to reorder, add music and slide the frame to the part you want, then render a 2160 × 3840 MP4. Clip audio is dropped.</p>
 
         <div class="drop-container">
           <div class="vidder-top">
@@ -333,7 +333,8 @@
 
         <div id="vidderSection" hidden>
           <div class="vidder-controls">
-            <label class="checkbox-label">Clip duration (sec): <input id="vidderClipDur" type="number" step="0.1" min="0.1" value="2" class="small-input"></label>
+            <label class="checkbox-label">Default clip duration (sec): <input id="vidderClipDur" type="number" step="0.1" min="0.1" value="2" class="small-input"></label>
+            <button id="vidderApplyAllBtn" class="browse-btn vidder-btn" title="Set every clip to the default duration">Apply to all</button>
             <label class="checkbox-label"><input type="checkbox" id="vidderVertOnly"> Vert vids only</label>
             <button id="vidderMusicBtn" class="browse-btn vidder-btn">Add Music (MP4/M4A)...</button>
           </div>
@@ -370,6 +371,7 @@
           </div>
         </div>
       </section>
+
 
     </div>
 

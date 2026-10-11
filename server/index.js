@@ -1748,7 +1748,7 @@ app.get('/api/vidder/wave', async (req, res) => {
   res.sendFile(out);
 });
 
-// Render: JSON { clips: [{path, start}], clipDur, music: {path, start} | null, filename }
+// Render: JSON { clips: [{path, start, dur}], clipDur (default when a clip has no dur), music: {path, start} | null, filename }
 // Each slice is encoded to an identical 2160x3840 30fps segment (clip audio dropped),
 // then segments are stream-copied together and the music window is muxed on top.
 app.post('/api/vidder/render', async (req, res) => {
@@ -1761,10 +1761,11 @@ app.post('/api/vidder/render', async (req, res) => {
   if (music && !fs.existsSync(music.path)) return res.status(400).json({ error: `Music not found: ${music.path}` });
 
   const OUT_W = 2160, OUT_H = 3840, FPS = 30;
-  const clipDur = Math.min(60, Math.max(0.1, parseFloat(req.body.clipDur) || 2));
-  const segFrames = Math.max(1, Math.round(clipDur * FPS));
-  const segDur = segFrames / FPS;
-  const total = segDur * clips.length;
+  const clipDur = Math.min(600, Math.max(0.1, parseFloat(req.body.clipDur) || 2));
+  // Each clip's slice as a whole number of frames
+  const segFrames = clips.map(c => Math.max(1, Math.round(Math.min(600, parseFloat(c.dur) || clipDur) * FPS)));
+  const segDurs = segFrames.map(f => f / FPS);
+  const total = segDurs.reduce((a, b) => a + b, 0);
   const musicStart = music ? Math.max(0, parseFloat(music.start) || 0) : 0;
 
   const clientFilename = (req.body.filename || 'vidder').replace(/[^A-Za-z0-9_.-]/g, '_');
@@ -1774,7 +1775,7 @@ app.post('/api/vidder/render', async (req, res) => {
   const outputPath = path.join(TMP_DIR, `vidder_${stamp}.mp4`);
   fs.mkdirSync(workDir, { recursive: true });
 
-  log('VIDDER render start', { clips: clips.length, clipDur: segDur, total, music: music && path.basename(music.path), musicStart });
+  log('VIDDER render start', { clips: clips.length, segDurs, total, music: music && path.basename(music.path), musicStart });
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -1810,8 +1811,8 @@ app.post('/api/vidder/render', async (req, res) => {
   const segPaths = clips.map((_, i) => path.join(workDir, `seg_${String(i).padStart(4, '0')}.mp4`));
   try {
     // Fill/crop to 9:16, force CFR, pad short clips by holding the last frame,
-    // and cap at an exact frame count so every cut lands on the same grid
-    const vf = [
+    // and cap at an exact frame count so every cut lands on the frame grid
+    const vfFor = (segDur) => [
       `fps=${FPS}`,
       `scale=${OUT_W}:${OUT_H}:force_original_aspect_ratio=increase:flags=lanczos`,
       `crop=${OUT_W}:${OUT_H}`,
@@ -1826,8 +1827,8 @@ app.post('/api/vidder/render', async (req, res) => {
         const i = nextIdx++;
         const start = Math.max(0, parseFloat(clips[i].start) || 0);
         try {
-          await run(['-hide_banner', '-ss', start.toFixed(3), '-t', (segDur + 1).toFixed(3),
-            '-i', clips[i].path, '-vf', vf, '-frames:v', String(segFrames), '-an',
+          await run(['-hide_banner', '-ss', start.toFixed(3), '-t', (segDurs[i] + 1).toFixed(3),
+            '-i', clips[i].path, '-vf', vfFor(segDurs[i]), '-frames:v', String(segFrames[i]), '-an',
             '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
             '-profile:v', 'high', '-level', '5.1', '-pix_fmt', 'yuv420p',
             '-y', segPaths[i]], `VIDDER seg${i + 1}`);
