@@ -1884,6 +1884,141 @@ app.post('/api/vidder/render', async (req, res) => {
   }
 });
 
+// ========== TEXT EFFECTS ==========
+// W3C compositing blend formulas on 0-255 values (x = video, y = text fill).
+// lut2 bakes each into a 256x256 table, so output matches CSS mix-blend-mode.
+const TEXTFX_BLEND = {
+  'multiply':    'x*y/255',
+  'screen':      'x+y-x*y/255',
+  'overlay':     'if(lte(x,127.5),2*x*y/255,255-2*(255-x)*(255-y)/255)',
+  'hard-light':  'if(lte(y,127.5),2*x*y/255,255-2*(255-x)*(255-y)/255)',
+  'soft-light':  'if(lte(y,127.5),x-(1-2*y/255)*x*(1-x/255),x+(2*y/255-1)*(if(lte(x,63.75),((16*x/255-12)*x/255+4)*x,sqrt(x/255)*255)-x))',
+  'darken':      'min(x,y)',
+  'lighten':     'max(x,y)',
+  'color-dodge': 'if(eq(x,0),0,if(gte(y,255),255,min(255,x*255/(255-y))))',
+  'color-burn':  'if(gte(x,255),255,if(eq(y,0),0,255-min(255,(255-x)*255/y)))',
+  'difference':  'abs(x-y)',
+  'exclusion':   'x+y-2*x*y/255',
+};
+
+// Render: multipart { filePath, boxes: JSON [{fill:'color'|'future', color, futureSec, blend}], masks[]: PNG per box, filename }
+// Each mask is the box's text drawn white (alpha = coverage x opacity) at video resolution by the browser.
+app.post('/api/textfx/render', upload.array('masks'), async (req, res) => {
+  const masks = req.files || [];
+  const cleanupMasks = () => masks.forEach(f => fs.unlink(f.path, () => {}));
+  const filePath = req.body.filePath;
+  let boxes;
+  try { boxes = JSON.parse(req.body.boxes || '[]'); } catch (_) { boxes = null; }
+  if (!filePath || !fs.existsSync(filePath)) { cleanupMasks(); return res.status(400).json({ error: 'File not found' }); }
+  if (!Array.isArray(boxes) || !boxes.length || boxes.length !== masks.length) {
+    cleanupMasks();
+    return res.status(400).json({ error: 'Boxes and masks missing or mismatched' });
+  }
+  const info = await vidderProbe(filePath);
+  if (!info) { cleanupMasks(); return res.status(400).json({ error: 'Could not probe video' }); }
+
+  const { width: W, height: H, duration } = info;
+  const fps = probeFps(filePath);
+  const [fNum, fDen] = fps.split('/').map(Number);
+  const frameDur = 1 / ((fDen ? fNum / fDen : fNum) || 30);
+  const clientFilename = (req.body.filename || 'text').replace(/[^A-Za-z0-9_.-]/g, '_');
+  const outName = clientFilename.endsWith('.mp4') ? clientFilename : `${clientFilename}.mp4`;
+  const outputPath = path.join(TMP_DIR, `textfx_${Date.now()}.mp4`);
+
+  // Graph: work in gbrp so blends are per RGB channel. Per box:
+  // fill (solid via lutrgb, or the source trimmed N sec ahead holding its last frame)
+  // -> optional lut2 blend against the running result -> maskedmerge through the mask.
+  const futures = boxes.map((b, i) => (b.fill === 'future' ? i : -1)).filter(i => i >= 0);
+  const parts = [];
+  parts.push(`[0:v]fps=${fps},setpts=PTS-STARTPTS,format=gbrp` +
+    (futures.length ? `,split=${futures.length + 1}[b0]${futures.map(i => `[s${i}]`).join('')}` : '[b0]'));
+  boxes.forEach((b, i) => {
+    const k = i + 1;
+    const blend = TEXTFX_BLEND[b.blend] ? b.blend : 'normal';
+    const isFuture = b.fill === 'future';
+    parts.push(`[${k}:v]format=rgba,alphaextract,scale=${W}:${H},format=gbrp[m${k}]`);
+    const outs = [`[p${k}]`];
+    if (blend !== 'normal') outs.push(`[c${k}]`);
+    if (!isFuture) outs.push(`[k${k}]`);
+    parts.push(outs.length > 1 ? `[b${i}]split=${outs.length}${outs.join('')}` : `[b${i}]null[p${k}]`);
+    if (isFuture) {
+      const n = Math.min(Math.max(0, parseFloat(b.futureSec) || 0), Math.max(0, duration - 2 * frameDur));
+      parts.push(`[s${i}]trim=start=${n.toFixed(3)},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${n.toFixed(3)}[f${k}]`);
+    } else {
+      const hex = /^#[0-9a-f]{6}$/i.test(b.color) ? b.color : '#ffffff';
+      const [r, g, bl] = [1, 3, 5].map(o => parseInt(hex.slice(o, o + 2), 16));
+      parts.push(`[k${k}]lutrgb=r=${r}:g=${g}:b=${bl}[f${k}]`);
+    }
+    let fill = `[f${k}]`;
+    if (blend !== 'normal') {
+      const e = `round(${TEXTFX_BLEND[blend]})`;
+      parts.push(`[c${k}][f${k}]lut2=c0='${e}':c1='${e}':c2='${e}'[x${k}]`);
+      fill = `[x${k}]`;
+    }
+    parts.push(`[p${k}]${fill}[m${k}]maskedmerge[b${k}]`);
+  });
+  parts.push(`[b${boxes.length}]crop=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[out]`);
+
+  const args = ['-hide_banner', '-progress', 'pipe:2', '-i', filePath];
+  masks.forEach(m => args.push('-f', 'png_pipe', '-i', m.path));
+  args.push('-filter_complex', parts.join(';'),
+    '-map', '[out]', '-map', '0:a?',
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k',
+    '-movflags', '+faststart', '-y', outputPath);
+
+  log('TEXTFX start', { file: path.basename(filePath), size: `${W}x${H}`, fps, boxes });
+  log('TEXTFX filter:', parts.join(';'));
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  const sendProgress = (pct) => res.write(`data: ${JSON.stringify({ type: 'progress', percent: pct })}\n\n`);
+
+  const ff = spawn('ffmpeg', args);
+  let finished = false;
+  let stderrBuf = '';
+  const logger = makeStderrLogger('TEXTFX');
+  ff.stderr.on('data', (d) => {
+    const chunk = d.toString();
+    stderrBuf = tail(stderrBuf + chunk, 4000);
+    logger(d);
+    const match = chunk.match(/out_time_ms=(\d+)/);
+    if (match && duration > 0) sendProgress(Math.min(99, Math.round((parseInt(match[1], 10) / 1e6 / duration) * 100)));
+  });
+  ff.on('close', (code) => {
+    if (res.writableEnded) return;
+    finished = true;
+    cleanupMasks();
+    if (code === 0 && fs.existsSync(outputPath)) {
+      const stat = fs.statSync(outputPath);
+      log('TEXTFX done,', (stat.size / 1024 / 1024).toFixed(1) + 'MB');
+      sendProgress(100);
+      const dlId = path.basename(outputPath);
+      pendingDownloads.set(dlId, { filePath: outputPath, filename: outName, cleanup: () => fs.unlink(outputPath, () => {}) });
+      res.write(`data: ${JSON.stringify({ type: 'complete', downloadUrl: `/api/download/${dlId}`, filename: outName })}\n\n`);
+    } else {
+      log('TEXTFX failed, code=' + code, tail(stderrBuf));
+      fs.unlink(outputPath, () => {});
+      res.write(`data: ${JSON.stringify({ type: 'error', error: 'Render failed', details: tail(stderrBuf) })}\n\n`);
+    }
+    res.end();
+  });
+  ff.on('error', (err) => {
+    if (res.writableEnded) return;
+    finished = true;
+    cleanupMasks();
+    res.write(`data: ${JSON.stringify({ type: 'error', error: 'Failed to start ffmpeg', details: err.message })}\n\n`);
+    res.end();
+  });
+  res.on('close', () => {
+    if (finished) return;
+    log('TEXTFX client disconnected, killing ffmpeg');
+    try { ff.kill('SIGKILL'); } catch (_) {}
+  });
+});
+
 app.listen(PORT, () => {
   log(`[cropper] listening on http://localhost:${PORT}`, 'tmp=', TMP_DIR, 'log=', LOG_FILE);
 });

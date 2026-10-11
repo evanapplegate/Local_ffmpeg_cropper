@@ -1,24 +1,15 @@
 # Local FFmpeg Tools
 
-Browser frontend for simple ffmpeg operations: crop, concatenate, timelapse, and make vertical- and square-cropped two-stack videos. Uses a small Node.js server to run ffmpeg and serve the browser UI.
+A browser UI for everyday ffmpeg jobs, backed by a small local Node server. Files are read in place by path, so nothing is uploaded and 10GB+ files are fine.
 
 ## Requirements
 
-- **macOS** — uses native Finder dialogs via `osascript` (OSX only)
-- **Node.js 16+** — [nodejs.org](https://nodejs.org)
-- **ffmpeg** — install via Homebrew:
+- macOS (uses Finder dialogs via `osascript`)
+- Node.js 16+
+- ffmpeg: `brew install ffmpeg`
+- Chrome recommended (Text Effects uses its local font access)
 
-```bash
-brew install ffmpeg
-```
-
-Verify both are installed:
-```bash
-node -v
-ffmpeg -version
-```
-
-## Setup
+## Run
 
 ```bash
 git clone https://github.com/evanapplegate/Local_ffmpeg_cropper.git
@@ -27,43 +18,27 @@ npm install
 npm start
 ```
 
-Then open **http://localhost:3000** in your browser.
-
-> **Tip:** Double-click `start.command` to launch without a terminal (make it executable first: `chmod +x start.command`).
-
----
+Open http://localhost:3000. Or double-click `start.command` (`chmod +x start.command` first).
 
 ## Tools
 
-### Video Cropper
-Browse an MP4 or MOV, drag the crop box, choose an aspect ratio (Free / 1:1 / 9:16 / 16:9), and export.
-
-### Video-Audio Combiner
-Browse a video file and a separate audio file (MOV, MP4, MP3, WAV, M4A). Drag the blocks on the timeline to sync them up, select an output range, and export a merged MP4.
-
-### Video Clip Concatenator
-Browse a video, then drag on the timeline to mark one or more segments. Export them joined together in order.
-
-### Clip Butt-Joiner
-Browse multiple clips (you can select several at once in Finder), reorder them with the ↑/↓ buttons, and join into one file. Uses lossless stream copy when all clips have matching frame rates; otherwise re-encodes to 30fps automatically.
-
-### Video Speeder-Upper
-Browse a video, enter a speed multiplier (e.g. `4` for 4x, `0.5` for half speed), and export. Uses parallel seek-based frame extraction so even 70-minute files process in under 2 minutes.
-
-### Reel/LinkedIn Timelapser
-Browse a set of "top" videos and a set of "bottom" videos. Set per-clip speed factors, then preview the stacked layout in Square (1:1 for LinkedIn) and Reels (9:16) mockups. Drag within each pane to reposition the crop, scroll wheel zooms in and out. Export both formats at once. Optional 4K (2160px wide) output.
-
-### Fast-Cut Music Vidder
-Click **Add Vids** and shift-click to pick several clips; click again to append more. Each loads as a row with a filmstrip. Set the clip duration (default 2s), then drag the box on each row to pick that clip's slice. The preview scrubs while you drag and loops the slice on release. Reorder by dragging rows or with the ↑/↓ buttons. Add music (MP4/M4A) and slide its frame along the waveform to pick the section; tick marks show where the cuts land, and **Play Sequence** previews the whole cut against the music. "Vert vids only" sets aside square and landscape clips. **Save Order** / **Load Order** write and read a JSON file with the clip order, each clip's slice, the music and its position, clip duration, and the vert-only setting. **Render** outputs a 2160×3840, 30fps MP4. Clip audio is dropped, so the music is the only soundtrack, and non-vertical clips are center-cropped to fill the frame.
-
----
+- **Image Padder**: pads a JPG/PNG/GIF with its own edge color, optionally to a square.
+- **Video Cropper**: drag a crop box (Free, 1:1, 9:16, 16:9) and export.
+- **Video-Audio Combiner**: sync a separate audio track to a video on a timeline and merge.
+- **Video Clip Concatenator**: mark segments of one video and join them in order.
+- **Clip Butt-Joiner**: join multiple clips; lossless when frame rates match, else re-encodes to 30fps.
+- **Video Speeder-Upper**: speed a video up or down; fast even on long files. Batch mode included.
+- **Reel/LinkedIn Timelapser**: stack top/bottom clip sets into Square and Reels timelapses with draggable crops.
+- **Video Shrinker**: re-encode to 1920px wide for smaller files.
+- **Video Flipper**: flip horizontally and/or vertically.
+- **Fast-Cut Music Vidder**: add clips (multi-select, appends), drag each row's box to pick a slice and its edges to set its length, reorder rows, slide a frame along the music waveform, preview the whole cut, and render a 2160×3840 30fps MP4 with the music as the only audio. Save/Load Order keeps a project as JSON.
+- **Text Effects**: draggable, scalable text boxes with real installed font faces (no faked bold/italic), alignment, line height, tracking, opacity and blend modes matching the preview. "Next N sec fill" fills the letters with the video N seconds ahead. Exports at source resolution with original audio.
 
 ## Tips
 
-- The **Server Log** panel at the bottom shows live ffmpeg output so you can see progress.
-- Use the **Light/Dark mode** toggle in the header.
-- All files are accessed by path — works great with large files (10GB+) since nothing is uploaded.
+- The Server Log panel at the bottom streams ffmpeg progress.
 - Exports download automatically when done.
+- Light/Dark toggle is in the header; ⟳ Kill & Restart resets the server.
 
 ## License
 

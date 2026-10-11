@@ -3326,6 +3326,713 @@
   updateStatus();
 })();
 
+// ========== TEXT EFFECTS ==========
+(function() {
+  const $ = (id) => document.getElementById(id);
+
+  function setHidden(el, hidden) {
+    if (hidden) el.setAttribute('hidden', '');
+    else el.removeAttribute('hidden');
+  }
+
+  async function postJson(url, payload) {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  }
+
+  const browseBtn = $('textfxBrowseBtn');
+  const fileInfoEl = $('textfxFileInfo');
+  const section = $('textfxSection');
+  const stage = $('textfxStage');
+  const video = $('textfxVideo');
+  const playBtn = $('textfxPlayBtn');
+  const scrub = $('textfxScrub');
+  const timeEl = $('textfxTime');
+  const addBtn = $('textfxAddBtn');
+  const boxListEl = $('textfxBoxList');
+  const propsEl = $('textfxProps');
+  const exportBtn = $('textfxExportBtn');
+  const progress = $('textfxProgress');
+  const progressFill = $('textfxProgressFill');
+  const progressLabel = $('textfxProgressLabel');
+  const ctl = {
+    text: $('textfxText'),
+    font: $('textfxFont'),
+    weight: $('textfxWeight'),
+    italic: $('textfxItalic'),
+    size: $('textfxSize'),
+    lineHeight: $('textfxLineHeight'),
+    tracking: $('textfxTracking'),
+    opacity: $('textfxOpacity'),
+    blend: $('textfxBlend'),
+    color: $('textfxColor'),
+    futureSec: $('textfxFutureSec'),
+    futureLabel: $('textfxFutureLabel'),
+    align: $('textfxAlign'),
+  };
+
+  const DEFAULT_FONTS = [
+    'Helvetica Neue', 'Helvetica', 'Arial', 'Arial Black', 'Avenir Next', 'Avenir Next Condensed',
+    'Futura', 'Gill Sans', 'Optima', 'Didot', 'Bodoni 72', 'Baskerville', 'Georgia', 'Times New Roman',
+    'Palatino', 'American Typewriter', 'Courier New', 'Menlo', 'Impact', 'Copperplate', 'Rockwell', 'system-ui'
+  ];
+  const GENERIC = /^(system-ui|serif|sans-serif|monospace|cursive|fantasy)$/;
+
+  let srcPath = null;
+  let W = 0, H = 0;      // video pixel size (display orientation)
+  let boxes = [];
+  let selected = null;
+  let nextId = 1;
+  let raf = 0;
+
+  const fileUrl = (p) => `/api/localfile?path=${encodeURIComponent(p)}`;
+  const fmtT = (s) => {
+    const ds = Math.round((s || 0) * 10);
+    const m = Math.floor(ds / 600);
+    return `${m}:${((ds - m * 600) / 10).toFixed(1).padStart(4, '0')}`;
+  };
+
+  function setFontOptions(families) {
+    const current = ctl.font.value;
+    ctl.font.innerHTML = '';
+    families.forEach(f => {
+      const o = document.createElement('option');
+      o.value = f;
+      o.textContent = f;
+      ctl.font.appendChild(o);
+    });
+    if (current && families.includes(current)) ctl.font.value = current;
+  }
+  setFontOptions(DEFAULT_FONTS);
+  const WEIGHT_OPTIONS = [...ctl.weight.options].map(o => [o.value, o.textContent]);
+
+  // ---- Real font faces ----
+  // With local font access we know every installed face, so the style list and
+  // italics map to actual font files and the browser never synthesizes them.
+  let faceData = null;          // family -> [{ ps, style, italic, rank, key }]
+  const faceLoads = new Map();  // postscript name -> { status, promise }
+
+  const WEIGHT_WORDS = [
+    [/hairline|thin/i, 100], [/(ultra|extra)\s*light/i, 200], [/(semi|demi)\s*light/i, 350], [/light/i, 300],
+    [/medium/i, 500], [/(semi|demi)\s*bold/i, 600], [/(extra|ultra)\s*bold|heavy/i, 800], [/black|ultra/i, 900], [/bold/i, 700],
+  ];
+  const styleRank = (style) => {
+    for (const [re, w] of WEIGHT_WORDS) if (re.test(style)) return w;
+    return 400;
+  };
+  const isItalicStyle = (style) => /italic|oblique/i.test(style);
+  // Upright and italic versions of a face share a key ("Bold" / "Bold Italic" -> "bold")
+  const styleKey = (style) => style.replace(/\b(italic|oblique|regular|roman|normal)\b/gi, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+  function uprightFaces(family) {
+    const faces = (faceData && faceData.get(family)) || [];
+    const up = faces.filter(f => !f.italic);
+    return up.length ? up : faces;
+  }
+
+  function italicTwin(family, style) {
+    if (!style) return null;
+    const faces = (faceData && faceData.get(family)) || [];
+    const k = styleKey(style);
+    return faces.find(f => f.italic && f.key === k) || null;
+  }
+
+  // The exact face a box draws with (null when face data isn't available)
+  function resolveFace(b) {
+    if (!faceData || !faceData.has(b.family)) return null;
+    const up = uprightFaces(b.family).find(f => f.style === b.style) || null;
+    return (b.italic && italicTwin(b.family, b.style)) || up;
+  }
+
+  // Snap a box's style/italic onto faces its family really has
+  function reconcileFace(b) {
+    if (!faceData || !faceData.has(b.family)) { b.italic = false; return; }
+    const ups = uprightFaces(b.family);
+    if (!ups.some(f => f.style === b.style)) {
+      const want = b.style ? styleRank(b.style) : b.weight;
+      b.style = ups.slice().sort((p, q) => Math.abs(p.rank - want) - Math.abs(q.rank - want) || p.style.length - q.style.length)[0].style;
+    }
+    b.weight = styleRank(b.style);
+    if (b.italic && !italicTwin(b.family, b.style)) b.italic = false;
+  }
+
+  // Register a single face under its own family name via local(), so drawing
+  // with it can't fall back to a synthesized bold or slant
+  const faceFamily = (ps) => `tfx-${ps}`;
+  function ensureFace(ps) {
+    if (faceLoads.has(ps)) return faceLoads.get(ps).promise;
+    const entry = { status: 'loading' };
+    entry.promise = new FontFace(faceFamily(ps), `local("${ps}")`).load()
+      .then(f => { document.fonts.add(f); entry.status = 'ok'; }, () => { entry.status = 'failed'; })
+      .then(() => boxes.forEach(update));
+    faceLoads.set(ps, entry);
+    return entry.promise;
+  }
+
+  async function loadFaces(prompt) {
+    if (faceData) return true;
+    if (!window.queryLocalFonts) return false;
+    try {
+      if (!prompt) {
+        const perm = await navigator.permissions.query({ name: 'local-fonts' });
+        if (perm.state !== 'granted') return false;
+      }
+      const fonts = await window.queryLocalFonts();
+      const map = new Map();
+      fonts.forEach(f => {
+        if (f.family.startsWith('.')) return;
+        if (!map.has(f.family)) map.set(f.family, []);
+        map.get(f.family).push({ ps: f.postscriptName, style: f.style, italic: isItalicStyle(f.style), rank: styleRank(f.style), key: styleKey(f.style) });
+      });
+      if (!map.size) return false;
+      map.forEach(list => list.sort((p, q) => p.rank - q.rank || p.style.localeCompare(q.style)));
+      faceData = map;
+      setFontOptions([...map.keys()].sort((a, b) => a.localeCompare(b)));
+      setHidden($('textfxFontsBtn'), true);
+      boxes.forEach(b => { reconcileFace(b); update(b); });
+      syncPanel();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  loadFaces(false);
+
+  // ---- Text layout + drawing (shared by preview layers and export masks) ----
+  // All box geometry is in video pixels; callers scale the context.
+
+  const measureCtx = document.createElement('canvas').getContext('2d');
+
+  function fontStr(b) {
+    const face = resolveFace(b);
+    if (face) {
+      const entry = faceLoads.get(face.ps);
+      if (!entry) ensureFace(face.ps);
+      else if (entry.status === 'ok') return `${b.size}px "${faceFamily(face.ps)}"`;
+    }
+    // Until the face loads, or without font access: family + weight, never italic
+    const fam = GENERIC.test(b.family) ? b.family : `"${b.family.replace(/"/g, '')}"`;
+    return `${b.weight} ${b.size}px ${fam}`;
+  }
+
+  function layout(b) {
+    measureCtx.font = fontStr(b);
+    measureCtx.letterSpacing = `${b.tracking}px`;
+    const lines = [];
+    for (const para of b.text.split('\n')) {
+      let line = '';
+      for (const word of para.split(' ')) {
+        const test = line ? `${line} ${word}` : word;
+        if (line && measureCtx.measureText(test).width > b.w) {
+          lines.push(line);
+          line = word;
+        } else {
+          line = test;
+        }
+      }
+      lines.push(line);
+    }
+    const lineH = b.size * b.lineHeight;
+    return { lines, lineH, h: Math.max(lineH, lines.length * lineH) };
+  }
+
+  function drawText(ctx, b, L) {
+    ctx.font = fontStr(b);
+    ctx.letterSpacing = `${b.tracking}px`;
+    ctx.textAlign = b.align;
+    ctx.textBaseline = 'middle';
+    const x = b.align === 'left' ? b.x : b.align === 'right' ? b.x + b.w : b.x + b.w / 2;
+    L.lines.forEach((line, i) => ctx.fillText(line, x, b.y + (i + 0.5) * L.lineH));
+  }
+
+  // ---- Preview layers ----
+
+  function paintLayer(b) {
+    const cw = video.clientWidth, ch = video.clientHeight;
+    if (!cw || !W) return;
+    const dpr = window.devicePixelRatio || 1;
+    const c = b.canvas;
+    const pw = Math.round(cw * dpr), ph = Math.round(ch * dpr);
+    if (c.width !== pw || c.height !== ph) {
+      c.width = pw;
+      c.height = ph;
+      c.style.width = cw + 'px';
+      c.style.height = ch + 'px';
+    }
+    const ctx = c.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, pw, ph);
+    const s = pw / W;
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.globalAlpha = b.opacity;
+    ctx.fillStyle = b.fill === 'future' ? '#ffffff' : b.color;
+    drawText(ctx, b, b.L);
+    // Future fill: keep the text's alpha, take color from the shifted video
+    if (b.fill === 'future' && b.futureVid && b.futureVid.readyState >= 2) {
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-in';
+      ctx.drawImage(b.futureVid, 0, 0, W, H);
+    }
+    b.paintedAt = b.futureVid ? b.futureVid.currentTime : null;
+    b.dirty = false;
+  }
+
+  function positionFrame(b) {
+    if (!W) return;
+    const s = video.clientWidth / W;
+    Object.assign(b.frame.style, {
+      left: b.x * s + 'px',
+      top: b.y * s + 'px',
+      width: b.w * s + 'px',
+      height: b.L.h * s + 'px',
+    });
+  }
+
+  function update(b) {
+    b.L = layout(b);
+    b.canvas.style.mixBlendMode = b.blend;
+    ensureFutureVid(b);
+    paintLayer(b);
+    positionFrame(b);
+  }
+
+  function ensureFutureVid(b) {
+    if (b.fill !== 'future' || !srcPath) return;
+    if (!b.futureVid) {
+      const fv = document.createElement('video');
+      fv.className = 'textfx-future';
+      fv.muted = true;
+      fv.playsInline = true;
+      fv.preload = 'auto';
+      fv.addEventListener('seeked', () => { b.dirty = true; });
+      fv.addEventListener('loadeddata', () => { b.dirty = true; });
+      stage.appendChild(fv);
+      b.futureVid = fv;
+    }
+    if (b.futureVid.dataset.path !== srcPath) {
+      b.futureVid.dataset.path = srcPath;
+      b.futureVid.src = fileUrl(srcPath);
+    }
+  }
+
+  // Keep each future video N sec ahead of the main one (holding the last frame
+  // at the end, like the render) and repaint its layer when its frame changes
+  function tick() {
+    raf = requestAnimationFrame(tick);
+    if (!W) return;
+    const t = video.currentTime;
+    const dur = video.duration || 0;
+    for (const b of boxes) {
+      if (b.fill !== 'future' || !b.futureVid) continue;
+      const fv = b.futureVid;
+      if (fv.readyState < 1) continue;
+      const target = Math.min(t + b.futureSec, Math.max(0, dur - 0.05));
+      const hold = video.paused || target < t + b.futureSec;
+      if (hold) {
+        if (!fv.paused) fv.pause();
+        if (!fv.seeking && Math.abs(fv.currentTime - target) > 0.03) fv.currentTime = target;
+      } else if (fv.paused) {
+        if (!fv.seeking) {
+          fv.currentTime = target;
+          fv.play().catch(() => {});
+        }
+      } else if (!fv.seeking && Math.abs(fv.currentTime - target) > 0.25) {
+        fv.currentTime = target;
+      }
+      if (!video.paused || b.dirty || fv.currentTime !== b.paintedAt) paintLayer(b);
+    }
+  }
+
+  // ---- Boxes ----
+
+  function attachFrameDrag(b) {
+    b.frame.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      select(b);
+      const mode = e.target.dataset.handle || 'move';
+      const s = video.clientWidth / W;
+      const start = { mx: e.clientX, my: e.clientY, x: b.x, y: b.y, w: b.w, size: b.size, tracking: b.tracking, h: b.L.h };
+      const onMove = (ev) => {
+        const dx = (ev.clientX - start.mx) / s;
+        const dy = (ev.clientY - start.my) / s;
+        if (mode === 'move') {
+          b.x = start.x + dx;
+          b.y = start.y + dy;
+        } else if (mode === 'e') {
+          b.w = Math.max(20, start.w + dx);
+        } else if (mode === 'w') {
+          b.w = Math.max(20, start.w - dx);
+          b.x = start.x + start.w - b.w;
+        } else {
+          // Corners scale the whole block, anchored at the opposite corner
+          const left = mode.includes('w');
+          const k = Math.max(20, left ? start.w - dx : start.w + dx) / start.w;
+          b.w = start.w * k;
+          b.size = Math.max(4, start.size * k);
+          b.tracking = start.tracking * k;
+          if (left) b.x = start.x + start.w - b.w;
+          if (mode.includes('n')) b.y = start.y + start.h - start.h * k;
+        }
+        update(b);
+        if (mode !== 'move' && mode !== 'e' && mode !== 'w') syncPanel();
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+    b.frame.addEventListener('dblclick', () => { ctl.text.focus(); ctl.text.select(); });
+  }
+
+  function addBox() {
+    if (!W) return;
+    const template = selected || null;
+    const b = {
+      id: nextId++,
+      text: template ? template.text : 'Your text',
+      family: template ? template.family : 'Helvetica Neue',
+      weight: template ? template.weight : 700,
+      italic: template ? template.italic : false,
+      style: template ? template.style : null,
+      size: template ? template.size : Math.round(H * 0.08),
+      color: template ? template.color : '#ffffff',
+      align: template ? template.align : 'center',
+      lineHeight: template ? template.lineHeight : 1.1,
+      tracking: template ? template.tracking : 0,
+      opacity: template ? template.opacity : 1,
+      blend: template ? template.blend : 'normal',
+      fill: template ? template.fill : 'color',
+      futureSec: template ? template.futureSec : 3,
+      w: template ? template.w : W * 0.8,
+      x: 0,
+      y: 0,
+    };
+    b.x = (W - b.w) / 2;
+    b.y = template ? Math.min(H - 20, template.y + template.L.h + b.size * 0.3) : H * 0.4;
+    reconcileFace(b);
+    b.canvas = document.createElement('canvas');
+    b.canvas.className = 'textfx-layer';
+    b.frame = document.createElement('div');
+    b.frame.className = 'textfx-frame';
+    ['nw', 'ne', 'sw', 'se', 'e', 'w'].forEach(h => {
+      const el = document.createElement('div');
+      el.className = 'handle ' + h;
+      el.dataset.handle = h;
+      b.frame.appendChild(el);
+    });
+    stage.appendChild(b.canvas);
+    stage.appendChild(b.frame);
+    attachFrameDrag(b);
+    boxes.push(b);
+    update(b);
+    select(b);
+  }
+
+  function removeBox(b) {
+    b.canvas.remove();
+    b.frame.remove();
+    if (b.futureVid) { b.futureVid.removeAttribute('src'); b.futureVid.load(); b.futureVid.remove(); }
+    boxes = boxes.filter(x => x !== b);
+    if (selected === b) selected = null;
+    // Keep DOM stacking in list order (later boxes blend over earlier ones)
+    select(selected || boxes[boxes.length - 1] || null);
+  }
+
+  function select(b) {
+    selected = b;
+    boxes.forEach(x => x.frame.classList.toggle('selected', x === b));
+    renderBoxList();
+    setHidden(propsEl, !b);
+    if (b) syncPanel();
+    exportBtn.disabled = !boxes.length || !srcPath;
+  }
+
+  function renderBoxList() {
+    boxListEl.innerHTML = '';
+    boxes.forEach((b, i) => {
+      const chip = document.createElement('div');
+      chip.className = 'textfx-chip' + (b === selected ? ' selected' : '');
+      const label = document.createElement('span');
+      label.textContent = `${i + 1}. ${b.text.replace(/\n/g, ' ') || '(empty)'}`;
+      const del = document.createElement('button');
+      del.textContent = '✕';
+      del.title = 'Delete';
+      del.addEventListener('click', (e) => { e.stopPropagation(); removeBox(b); });
+      chip.append(label, del);
+      chip.addEventListener('click', () => select(b));
+      boxListEl.appendChild(chip);
+    });
+  }
+
+  function syncPanel() {
+    const b = selected;
+    if (!b) return;
+    if (document.activeElement !== ctl.text) ctl.text.value = b.text;
+    if (![...ctl.font.options].some(o => o.value === b.family)) {
+      const o = document.createElement('option');
+      o.value = o.textContent = b.family;
+      ctl.font.appendChild(o);
+    }
+    ctl.font.value = b.family;
+    // Style list: the family's real upright faces when known, else plain weights
+    const ups = faceData && faceData.has(b.family) ? uprightFaces(b.family) : null;
+    const opts = ups ? ups.map(f => [f.style, f.style]) : WEIGHT_OPTIONS;
+    const sig = opts.map(o => o[0]).join('|');
+    if (ctl.weight.dataset.sig !== sig) {
+      ctl.weight.innerHTML = '';
+      opts.forEach(([value, label]) => {
+        const o = document.createElement('option');
+        o.value = value;
+        o.textContent = label;
+        ctl.weight.appendChild(o);
+      });
+      ctl.weight.dataset.sig = sig;
+    }
+    ctl.weight.value = ups ? b.style : String(b.weight);
+    const twin = ups ? italicTwin(b.family, b.style) : null;
+    ctl.italic.disabled = !twin;
+    ctl.italic.title = twin ? `Italic (${twin.style})`
+      : faceData ? `${b.family} ${b.style || ''} has no italic`
+      : 'Allow font access (Installed fonts) to use real italics';
+    ctl.italic.classList.toggle('active', !!twin && b.italic);
+    ctl.size.value = Math.round(b.size);
+    ctl.lineHeight.value = b.lineHeight;
+    ctl.tracking.value = Math.round(b.tracking);
+    ctl.opacity.value = Math.round(b.opacity * 100);
+    ctl.blend.value = b.blend;
+    ctl.color.value = b.color;
+    ctl.futureSec.value = b.futureSec;
+    ctl.futureLabel.textContent = b.futureSec.toFixed(1);
+    document.querySelectorAll('input[name="textfxFill"]').forEach(r => { r.checked = r.value === b.fill; });
+    [...ctl.align.children].forEach(btn => btn.classList.toggle('active', btn.dataset.align === b.align));
+  }
+
+  // Panel -> selected box
+  const bind = (el, evt, apply) => el.addEventListener(evt, () => {
+    if (!selected) return;
+    apply(selected);
+    update(selected);
+  });
+  bind(ctl.text, 'input', (b) => { b.text = ctl.text.value; renderBoxList(); });
+  bind(ctl.font, 'change', (b) => {
+    b.family = ctl.font.value;
+    reconcileFace(b);
+    syncPanel();
+  });
+  bind(ctl.weight, 'change', (b) => {
+    if (faceData && faceData.has(b.family)) {
+      b.style = ctl.weight.value;
+      reconcileFace(b);
+    } else {
+      b.weight = parseInt(ctl.weight.value, 10) || b.weight;
+    }
+    syncPanel();
+  });
+  bind(ctl.italic, 'click', (b) => {
+    if (!italicTwin(b.family, b.style)) return;
+    b.italic = !b.italic;
+    syncPanel();
+  });
+  bind(ctl.size, 'input', (b) => { b.size = Math.max(4, parseFloat(ctl.size.value) || b.size); });
+  bind(ctl.lineHeight, 'input', (b) => { b.lineHeight = Math.max(0.5, parseFloat(ctl.lineHeight.value) || b.lineHeight); });
+  bind(ctl.tracking, 'input', (b) => { b.tracking = parseFloat(ctl.tracking.value) || 0; });
+  bind(ctl.opacity, 'input', (b) => { b.opacity = parseInt(ctl.opacity.value, 10) / 100; });
+  bind(ctl.blend, 'change', (b) => { b.blend = ctl.blend.value; });
+  bind(ctl.color, 'input', (b) => {
+    b.color = ctl.color.value;
+    b.fill = 'color';
+    syncPanel();
+  });
+  bind(ctl.futureSec, 'input', (b) => {
+    b.futureSec = parseFloat(ctl.futureSec.value);
+    b.fill = 'future';
+    syncPanel();
+  });
+  document.querySelectorAll('input[name="textfxFill"]').forEach(r => bind(r, 'change', (b) => { b.fill = r.value; }));
+  [...ctl.align.children].forEach(btn => bind(btn, 'click', (b) => {
+    b.align = btn.dataset.align;
+    syncPanel();
+  }));
+  bind($('textfxCenterH'), 'click', (b) => { b.x = (W - b.w) / 2; });
+  bind($('textfxCenterV'), 'click', (b) => { b.y = (H - b.L.h) / 2; });
+  $('textfxDeleteBtn').addEventListener('click', () => { if (selected) removeBox(selected); });
+
+  $('textfxFontsBtn').addEventListener('click', async () => {
+    if (!window.queryLocalFonts) return alert('This browser cannot list installed fonts (needs Chrome).');
+    if (!(await loadFaces(true))) alert('Font access was not granted. Allow it for this site in Chrome settings.');
+  });
+  // Ask for font access on the first click in the editor (one-time Chrome prompt)
+  let askedFonts = false;
+  section.addEventListener('mousedown', () => {
+    if (faceData || askedFonts) return;
+    askedFonts = true;
+    loadFaces(true);
+  });
+
+  addBtn.addEventListener('click', addBox);
+
+  // Delete / arrow-nudge the selected box, only while working in this section and not typing
+  let keysActive = false;
+  document.addEventListener('mousedown', (e) => { keysActive = !!e.target.closest('#textfx'); }, true);
+  document.addEventListener('keydown', (e) => {
+    if (!selected || !keysActive || section.hidden) return;
+    const tag = e.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    const step = e.shiftKey ? 10 : 1;
+    const moves = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+    if (moves[e.key]) {
+      e.preventDefault();
+      selected.x += moves[e.key][0];
+      selected.y += moves[e.key][1];
+      update(selected);
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      removeBox(selected);
+    }
+  });
+
+  stage.addEventListener('mousedown', (e) => {
+    if (e.target === video) select(null);
+  });
+
+  // ---- Video + transport ----
+
+  browseBtn.addEventListener('click', async () => {
+    try {
+      const picked = await postJson('/api/browse', { accept: 'mov,mp4,m4v' });
+      if (picked.canceled || !picked.paths || !picked.paths.length) return;
+      const info = await postJson('/api/probe', { filePath: picked.paths[0] });
+      srcPath = picked.paths[0];
+      fileInfoEl.textContent = `${info.filename} • ${(info.size / 1e6).toFixed(1)} MB`;
+      setHidden(fileInfoEl, false);
+      setHidden(section, false);
+      video.src = fileUrl(srcPath);
+    } catch (err) { alert('Path error: ' + err.message); }
+  });
+
+  video.addEventListener('loadedmetadata', () => {
+    const oldW = W;
+    W = video.videoWidth;
+    H = video.videoHeight;
+    // Carry boxes over to a new clip, scaled to its width
+    if (oldW && oldW !== W) {
+      const k = W / oldW;
+      boxes.forEach(b => { b.x *= k; b.y *= k; b.w *= k; b.size *= k; b.tracking *= k; });
+    }
+    scrub.max = String(video.duration || 1);
+    requestAnimationFrame(() => {
+      if (!boxes.length) addBox();
+      else boxes.forEach(update);
+      select(selected || boxes[0]);
+    });
+    if (!raf) raf = requestAnimationFrame(tick);
+  });
+
+  new ResizeObserver(() => boxes.forEach(b => { paintLayer(b); positionFrame(b); })).observe(video);
+
+  playBtn.addEventListener('click', () => {
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  });
+  video.addEventListener('play', () => { playBtn.textContent = 'Pause'; });
+  video.addEventListener('pause', () => { playBtn.textContent = 'Play'; });
+  video.addEventListener('ended', () => { playBtn.textContent = 'Play'; });
+  video.addEventListener('timeupdate', () => {
+    scrub.value = String(video.currentTime);
+    timeEl.textContent = fmtT(video.currentTime);
+  });
+  scrub.addEventListener('input', () => {
+    video.currentTime = parseFloat(scrub.value);
+    timeEl.textContent = fmtT(video.currentTime);
+  });
+
+  // ---- Export ----
+
+  function maskBlob(b) {
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext('2d');
+    ctx.globalAlpha = b.opacity;
+    ctx.fillStyle = '#ffffff';
+    drawText(ctx, b, layout(b));
+    return new Promise(resolve => c.toBlob(resolve, 'image/png'));
+  }
+
+  exportBtn.addEventListener('click', async () => {
+    if (!srcPath || !boxes.length) return;
+    video.pause();
+    exportBtn.disabled = true;
+    exportBtn.textContent = 'Exporting...';
+    setHidden(progress, false);
+    progressFill.style.width = '0%';
+    progressLabel.textContent = '0%';
+
+    try {
+      const form = new FormData();
+      form.append('filePath', srcPath);
+      form.append('boxes', JSON.stringify(boxes.map(b => ({
+        fill: b.fill, color: b.color, futureSec: b.futureSec, blend: b.blend
+      }))));
+      // Masks must be drawn with the exact faces, so wait for any still loading
+      await Promise.all(boxes.map(b => { const f = resolveFace(b); return f ? ensureFace(f.ps) : null; }));
+      for (const b of boxes) form.append('masks', await maskBlob(b), `mask_${b.id}.png`);
+      const base = srcPath.split('/').pop().replace(/\.[^.]+$/, '');
+      form.append('filename', `${base}_text.mp4`);
+
+      const resp = await fetch('/api/textfx/render', { method: 'POST', body: form });
+      if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `HTTP ${resp.status}`);
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          const msg = JSON.parse(part.slice(6));
+          if (msg.type === 'progress') {
+            progressFill.style.width = msg.percent + '%';
+            progressLabel.textContent = msg.percent + '%';
+          } else if (msg.type === 'complete') {
+            progressFill.style.width = '100%';
+            progressLabel.textContent = 'Done!';
+            const a = document.createElement('a');
+            a.href = msg.downloadUrl;
+            a.download = msg.filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+          } else if (msg.type === 'error') {
+            throw new Error(msg.error + (msg.details ? ': ' + msg.details : ''));
+          }
+        }
+      }
+    } catch (err) {
+      alert('Export failed: ' + err.message);
+      setHidden(progress, true);
+    } finally {
+      exportBtn.disabled = !boxes.length;
+      exportBtn.textContent = 'Export MP4';
+    }
+  });
+})();
+
 // Kill & restart server
 (function() {
   const btn = document.getElementById('restartBtn');

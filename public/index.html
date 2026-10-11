@@ -372,6 +372,106 @@
         </div>
       </section>
 
+      <section class="textfx" id="textfx">
+        <h2>Text Effects</h2>
+        <p class="section-desc">Browse a video, add text boxes and drag them on the frame (corners scale, sides set wrap width). Style the font, blend mode and fill: a solid color, or the video N seconds ahead showing through the letters. Exports at source resolution.</p>
+
+        <div class="drop-container">
+          <button id="textfxBrowseBtn" class="browse-btn">Browse Finder...</button>
+          <div id="textfxFileInfo" class="file-info-small" hidden></div>
+        </div>
+
+        <div id="textfxSection" hidden>
+          <div class="textfx-body">
+            <div class="textfx-stage-col">
+              <div class="textfx-stage" id="textfxStage">
+                <video id="textfxVideo" playsinline preload="auto"></video>
+              </div>
+              <div class="textfx-transport">
+                <button id="textfxPlayBtn" class="primary">Play</button>
+                <input id="textfxScrub" type="range" min="0" max="1" step="0.01" value="0">
+                <span id="textfxTime" class="textfx-time">0:00.0</span>
+              </div>
+            </div>
+
+            <div class="textfx-panel">
+              <button id="textfxAddBtn" class="browse-btn">+ Add Text</button>
+              <div id="textfxBoxList" class="textfx-boxlist"></div>
+
+              <div id="textfxProps" class="textfx-props" hidden>
+                <textarea id="textfxText" rows="3" spellcheck="false"></textarea>
+                <div class="textfx-row">
+                  <select id="textfxFont"></select>
+                  <button id="textfxFontsBtn" class="textfx-mini" title="Allow font access: lists every installed font and only offers styles and italics the font really has">Installed fonts</button>
+                </div>
+                <div class="textfx-row">
+                  <select id="textfxWeight">
+                    <option value="100">Thin 100</option>
+                    <option value="200">Extra Light 200</option>
+                    <option value="300">Light 300</option>
+                    <option value="400">Regular 400</option>
+                    <option value="500">Medium 500</option>
+                    <option value="600">Semibold 600</option>
+                    <option value="700">Bold 700</option>
+                    <option value="800">Extra Bold 800</option>
+                    <option value="900">Black 900</option>
+                  </select>
+                  <button id="textfxItalic" class="textfx-mini textfx-italic" title="Italic">I</button>
+                  <label class="textfx-field">Size <input id="textfxSize" type="number" min="4" step="1"></label>
+                </div>
+                <div class="textfx-row">
+                  <div class="textfx-seg" id="textfxAlign">
+                    <button data-align="left" title="Align left">Left</button>
+                    <button data-align="center" title="Align center">Center</button>
+                    <button data-align="right" title="Align right">Right</button>
+                  </div>
+                </div>
+                <div class="textfx-row">
+                  <label class="textfx-field">Line height <input id="textfxLineHeight" type="number" min="0.5" max="3" step="0.05"></label>
+                  <label class="textfx-field">Tracking <input id="textfxTracking" type="number" step="1"></label>
+                </div>
+                <div class="textfx-row">
+                  <label class="textfx-field textfx-grow">Opacity <input id="textfxOpacity" type="range" min="0" max="100" step="1"></label>
+                </div>
+                <div class="textfx-row">
+                  <label class="textfx-field textfx-grow">Blend
+                    <select id="textfxBlend">
+                      <option value="normal">Normal</option>
+                      <option value="multiply">Multiply</option>
+                      <option value="screen">Screen</option>
+                      <option value="overlay">Overlay</option>
+                      <option value="soft-light">Soft Light</option>
+                      <option value="hard-light">Hard Light</option>
+                      <option value="darken">Darken</option>
+                      <option value="lighten">Lighten</option>
+                      <option value="color-dodge">Color Dodge</option>
+                      <option value="color-burn">Color Burn</option>
+                      <option value="difference">Difference</option>
+                      <option value="exclusion">Exclusion</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="textfx-fill">
+                  <label class="checkbox-label"><input type="radio" name="textfxFill" value="color"> Color <input id="textfxColor" type="color"></label>
+                  <label class="checkbox-label"><input type="radio" name="textfxFill" value="future"> Next <span id="textfxFutureLabel">3.0</span>s fill</label>
+                  <input id="textfxFutureSec" type="range" min="0.1" max="10" step="0.1">
+                </div>
+                <div class="textfx-row">
+                  <button id="textfxCenterH" class="textfx-mini">Center ↔</button>
+                  <button id="textfxCenterV" class="textfx-mini">Center ↕</button>
+                  <button id="textfxDeleteBtn" class="textfx-mini textfx-danger">Delete</button>
+                </div>
+              </div>
+
+              <button id="textfxExportBtn" class="primary" disabled>Export MP4</button>
+              <div id="textfxProgress" class="joiner-progress" hidden>
+                <div class="joiner-progress-bar"><div id="textfxProgressFill" class="joiner-progress-fill"></div></div>
+                <span id="textfxProgressLabel">0%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
     </div>
 
